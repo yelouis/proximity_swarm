@@ -145,30 +145,12 @@ Instead of embedding raw tool outputs or full source code, we construct a hybrid
 ---
 
 ### C. How do agents transfer state?
-Since agents are not limited to coding tasks and may be doing research, writing, math, or executing APIs, state transfer must be environment-agnostic. We propose three general mechanisms:
+Since agents are not limited to coding tasks and may be doing research, writing, math, or executing APIs, state transfer must be environment-agnostic. We use a **Shared Workspace Directory (The "Blackboard" File System)** to handle this:
 
-1. **Shared Workspace Directory (The "Blackboard" File System):**
-   - The swarm shares a root workspace. Each active agent is allocated a designated subfolder (e.g., `./workspace/agent_A/`) to isolate its scratch files and intermediate thoughts.
-   - **Spawning (Underpopulation):** When a new agent is created, the supervisor automatically provisions a new directory (e.g., `./workspace/agent_B/`). 
-     - *Initialization:* To give the new agent a head start, the supervisor can copy or symlink relevant context files (like reference documents, prompt inputs, or partial results) from the parent's directory into the new agent's directory.
-   - **Termination & Cleanup:** Before Agent A self-terminates, it moves its final output files or relevant datasets to a shared folder (`./workspace/shared/`) or directly into the recipient agent's directory, and then the supervisor deletes or archives `agent_A`'s folder.
-   - This keeps active work sandboxed while ensuring zero resource leaks when agents die.
-
-2. **Structured Handover Packet (Context Injection):**
-   - The terminating agent compiles a serialized JSON payload containing its local state variables:
-     ```json
-     {
-       "variables": {"retrieved_api_key": "xyz", "target_url": "example.com"},
-       "findings": ["Endpoint X returned status 200", "Documentation suggests using v2 API"],
-       "traps_avoided": ["v1 API is deprecated, do not use"],
-       "pending_actions": ["Fetch data from /v2/analytics"]
-     }
-     ```
-   - The supervisor/coordinator injects this payload directly into Agent B's system prompt or working memory context in the next step.
-
-3. **Key-Value Store / Shared Memory Database:**
-   - A central lightweight database (like SQLite or Redis) tracks key-value parameters.
-   - Agents read/write to keys namespace-prefixed by task or agent.
-   - When Agent A dies, it updates the status of its keys to `released`, enabling Agent B to acquire lock/ownership over those variables and continue the work.
+- **Isolated Workspace Folders:** The swarm shares a root workspace directory. Each active agent is allocated a designated subfolder (e.g., `./workspace/agent_A/`) to isolate its scratch files, local downloads, and intermediate thoughts.
+- **Spawning (Underpopulation):** When a new agent is created, the supervisor automatically provisions a new directory (e.g., `./workspace/agent_B/`). 
+  - *Initialization:* To give the new agent a head start, the supervisor copies or symlinks relevant context files (like reference documents, prompt inputs, or partial results) from the parent's directory into the new agent's directory.
+- **Termination & Cleanup:** Before Agent A self-terminates, it moves its final output files or relevant datasets to a shared folder (`./workspace/shared/`) or directly into the recipient agent's directory (e.g., `./workspace/agent_B/`). The supervisor then deletes or archives `agent_A`'s folder.
+- **Benefits:** This keeps active work sandboxed while ensuring zero resource leaks when agents die, all without requiring external databases or version control systems.
 
 
