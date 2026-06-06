@@ -114,10 +114,47 @@ When a Sync Event is triggered, the two proximate agents pause execution and ini
 
 ---
 
-## 6. Open Questions & Brainstorming Points
+## 6. Proposed Solutions for Open Questions
 
-> [!NOTE]
-> Let's discuss these questions to refine our design:
-> 1. **How do we keep LLM costs low during sync?** If agents converse on every minor step, the coordination overhead might exceed the savings. Should we use cheap embeddings first, and only spin up an LLM conversation for high-confidence matches?
-> 2. **What is the optimal embedding strategy for trajectories?** How do we convert a sequence of code files, terminal errors, and thoughts into a single comparable semantic vector?
-> 3. **How do agents transfer state?** If Agent A terminates and Agent B takes over, how does Agent B "absorb" Agent A's file edits or active variables?
+### A. How do we keep LLM costs low during sync?
+To prevent exponential cost and high latency, we propose a **Tiered Proximity Pipeline**:
+
+1. **Stage 1: Structural Filter ($O(1)$ cost)**
+   - Check if agents share active directory paths, touched files, or command prefixes. If there is no overlap, skip checking.
+2. **Stage 2: Embedding Similarity Check (Very Cheap)**
+   - Generate embeddings for each agent's active sub-task (using a lightweight model like `text-embedding-3-small`). Calculate cosine similarity. Only proceed if similarity $> 0.8$.
+3. **Stage 3: Gated LLM Check (Low-cost Model)**
+   - Feed a concise summary of both trajectories to a cheap model (e.g., `gemini-1.5-flash`). Ask a binary question: *"Is there redundancy or a direct learning overlap between these two agent paths? Answer YES or NO."*
+4. **Stage 4: Full Negotiation (Advanced Model)**
+   - Only if Stage 3 returns YES, pause both agents and initiate the LLM negotiation protocol to decide on termination or sharing.
+
+*Additionally, we can **rate-limit** sync checks to only occur at natural milestones (e.g., when a subtask ends, when a command fails, or every 5 steps) rather than on every single tool invocation.*
+
+---
+
+### B. What is the optimal embedding strategy for trajectories?
+Instead of embedding raw tool outputs or full source code, we construct a hybrid **State Vector**:
+
+1. **Semantic Layer:** Embedding of the high-level goal concatenated with the current step's planned objective.
+2. **Structural Layer:** A set representation of accessed files, modified files, and tools used. Similarity is calculated using the Jaccard index:
+   $$J(A, B) = \frac{|A \cap B|}{|A \cup B|}$$
+3. **Composite Proximity Metric:**
+   $$\text{Proximity} = w_1 \cdot \text{CosineSim}(\text{Semantic}_A, \text{Semantic}_B) + w_2 \cdot J(\text{Files}_A, \text{Files}_B)$$
+   This ensures that agents are deemed "proximate" only if they are both thinking about the same concept *and* working in the same structural area.
+
+---
+
+### C. How do agents transfer state?
+If Agent A terminates because Agent B is further ahead (or vice-versa), state is transferred via:
+
+1. **Git Branching & Cherry-picking:**
+   - Every agent operates in its own local branch (e.g., `swarm/agent-A`).
+   - Before Agent A self-terminates, it commits its current uncommitted modifications: `git commit -am "handover: partial progress on auth.py"`.
+   - Agent B is notified, checks out or merges `swarm/agent-A` into `swarm/agent-B` to absorb the edits, and continues.
+2. **Handover Pack:**
+   - The dying agent writes a JSON file in the shared directory (e.g., `.swarm/handovers/agent-A.json`) containing:
+     - A list of files changed and the intent of those changes.
+     - Extracted values (e.g., local server ports, success outputs, API endpoints found).
+     - The next logical steps it was planning.
+   - The supervisor injects this handover summary directly into Agent B's system prompt or memory.
+
