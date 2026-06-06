@@ -153,4 +153,27 @@ Since agents are not limited to coding tasks and may be doing research, writing,
 - **Termination & Cleanup:** Before Agent A self-terminates, it moves its final output files or relevant datasets to a shared folder (`./workspace/shared/`) or directly into the recipient agent's directory (e.g., `./workspace/agent_B/`). The supervisor then deletes or archives `agent_A`'s folder.
 - **Benefits:** This keeps active work sandboxed while ensuring zero resource leaks when agents die, all without requiring external databases or version control systems.
 
+---
+
+## 7. Swarm Industry Parallels & Missing Structural Elements
+
+Based on academic literature and open-source multi-agent frameworks (e.g., OpenAI's Swarm, AutoGen, and research papers on agent belief maps, episodic experience logs, and agent kill switches), several critical structural components should be added to the Proximity Swarm design to make it viable:
+
+### A. Cascading Kill Switch & Circuit Breakers (Runaway Prevention)
+* **The Problem:** Because agents can clone themselves (underpopulation/reproduction), an error in task splitting can cause infinite loops of agents spawning sub-agents, leading to runaway API costs and high local resource consumption.
+* **The Solution:** A centralized **Supervisor Orchestrator** manages the system process tree. If an agent is terminated manually or crashes, the supervisor issues a cascading termination signal down the parent-child line (`parent_id`), instantly freezing directories, terminating subprocesses, and reclaiming budget limits.
+
+### B. Path Tombstones & Belief Map Garbage Collection
+* **The Problem:** In Conway's Game of Life, dead cells leave the board immediately. In Proximity Swarm, if an agent fails and dies, its workspace folders could linger and go ignored. If we delete them entirely, subsequent agents might wander into the exact same trap.
+* **The Solution:** We introduce a **Tombstone Database/Index**. When an agent encounters a blocker (e.g., a broken URL, outdated package, or dead-end reasoning path) and terminates, the supervisor logs that trajectory coordinate as a `Tombstone`. Before other active agents make plans, they query this tombstone index and dynamically steer their trajectories away from known failure nodes (acting as a dynamic "belief map" of danger).
+
+### C. Consensus-Gated Termination (Extinction Prevention)
+* **The Problem:** During 1-on-1 LLM negotiation, the two agents might suffer from "compliance hallucinations" where they both decide to self-terminate (e.g., Agent A: *"I'll stop because you're ahead."* Agent B: *"Wait, I encountered an error, so I should stop too."*). This results in total swarm extinction before the goal is met.
+* **The Solution:** Agent termination cannot be decided purely locally. The agents negotiate and propose a plan, but the **Supervisor Orchestrator** must approve the self-termination. The supervisor ensures that at least one agent is kept alive on a task branch if the goal is unresolved.
+
+### D. Deconfliction Goal Queuing
+* **The Problem:** If multiple agents are spawned simultaneously, they might spend their first 5-10 steps executing identical setup phases before their trajectories drift close enough for the Proximity Engine to detect a collision.
+* **The Solution:** Implement a **Goal Deconfliction Queue** in the tracker. When agents are initialized, the supervisor assigns subtle parameter offsets (e.g., searching different sub-queries, using different URLs, or analyzing separate files) so they start their trajectories on divergent, non-overlapping paths.
+
+
 
