@@ -145,16 +145,28 @@ Instead of embedding raw tool outputs or full source code, we construct a hybrid
 ---
 
 ### C. How do agents transfer state?
-If Agent A terminates because Agent B is further ahead (or vice-versa), state is transferred via:
+Since agents are not limited to coding tasks and may be doing research, writing, math, or executing APIs, state transfer must be environment-agnostic. We propose three general mechanisms:
 
-1. **Git Branching & Cherry-picking:**
-   - Every agent operates in its own local branch (e.g., `swarm/agent-A`).
-   - Before Agent A self-terminates, it commits its current uncommitted modifications: `git commit -am "handover: partial progress on auth.py"`.
-   - Agent B is notified, checks out or merges `swarm/agent-A` into `swarm/agent-B` to absorb the edits, and continues.
-2. **Handover Pack:**
-   - The dying agent writes a JSON file in the shared directory (e.g., `.swarm/handovers/agent-A.json`) containing:
-     - A list of files changed and the intent of those changes.
-     - Extracted values (e.g., local server ports, success outputs, API endpoints found).
-     - The next logical steps it was planning.
-   - The supervisor injects this handover summary directly into Agent B's system prompt or memory.
+1. **Shared Workspace Directory (The "Blackboard" File System):**
+   - The swarm shares a root workspace. Each agent is allocated a subfolder (e.g., `./workspace/agent_A/`).
+   - Before Agent A self-terminates, it moves its relevant output files and data artifacts to a shared folder `./workspace/shared/` or directly to Agent B's folder.
+   - This allows Agent B to read Agent A's output files without version control systems.
+
+2. **Structured Handover Packet (Context Injection):**
+   - The terminating agent compiles a serialized JSON payload containing its local state variables:
+     ```json
+     {
+       "variables": {"retrieved_api_key": "xyz", "target_url": "example.com"},
+       "findings": ["Endpoint X returned status 200", "Documentation suggests using v2 API"],
+       "traps_avoided": ["v1 API is deprecated, do not use"],
+       "pending_actions": ["Fetch data from /v2/analytics"]
+     }
+     ```
+   - The supervisor/coordinator injects this payload directly into Agent B's system prompt or working memory context in the next step.
+
+3. **Key-Value Store / Shared Memory Database:**
+   - A central lightweight database (like SQLite or Redis) tracks key-value parameters.
+   - Agents read/write to keys namespace-prefixed by task or agent.
+   - When Agent A dies, it updates the status of its keys to `released`, enabling Agent B to acquire lock/ownership over those variables and continue the work.
+
 
