@@ -148,9 +148,11 @@ Instead of embedding raw tool outputs or full source code, we construct a hybrid
 Since agents are not limited to coding tasks and may be doing research, writing, math, or executing APIs, state transfer must be environment-agnostic. We propose three general mechanisms:
 
 1. **Shared Workspace Directory (The "Blackboard" File System):**
-   - The swarm shares a root workspace. Each agent is allocated a subfolder (e.g., `./workspace/agent_A/`).
-   - Before Agent A self-terminates, it moves its relevant output files and data artifacts to a shared folder `./workspace/shared/` or directly to Agent B's folder.
-   - This allows Agent B to read Agent A's output files without version control systems.
+   - The swarm shares a root workspace. Each active agent is allocated a designated subfolder (e.g., `./workspace/agent_A/`) to isolate its scratch files and intermediate thoughts.
+   - **Spawning (Underpopulation):** When a new agent is created, the supervisor automatically provisions a new directory (e.g., `./workspace/agent_B/`). 
+     - *Initialization:* To give the new agent a head start, the supervisor can copy or symlink relevant context files (like reference documents, prompt inputs, or partial results) from the parent's directory into the new agent's directory.
+   - **Termination & Cleanup:** Before Agent A self-terminates, it moves its final output files or relevant datasets to a shared folder (`./workspace/shared/`) or directly into the recipient agent's directory, and then the supervisor deletes or archives `agent_A`'s folder.
+   - This keeps active work sandboxed while ensuring zero resource leaks when agents die.
 
 2. **Structured Handover Packet (Context Injection):**
    - The terminating agent compiles a serialized JSON payload containing its local state variables:
