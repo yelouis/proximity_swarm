@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import time
+import urllib.request
+import urllib.error
+import argparse
+
+STATE_DIR = os.path.join(os.getcwd(), ".proximity_swarm")
+AGENTS_DIR = os.path.join(STATE_DIR, "agents")
+COLLISIONS_DIR = os.path.join(STATE_DIR, "collisions")
+WORKSPACES_DIR = os.path.join(STATE_DIR, "workspaces")
+TOMBSTONES_FILE = os.path.join(STATE_DIR, "tombstones.json")
+MOCK_TASKS_FILE = os.path.join(os.getcwd(), "mock_tasks.json")
+
+
+def load_json(filepath):
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_json(filepath, data):
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def call_gemini_api(prompt):
+    """Call the Gemini API using urllib to avoid external library dependencies."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    body = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        }
+    }
+    
+    try:
+        req = urllib.request.Request(
+            url, 
+            data=json.dumps(body).encode("utf-8"), 
+            headers=headers, 
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(text.strip())
+    except Exception as e:
+        # Fallback to None if API call fails or JSON parse fails
+        print(f"[LLM ERROR] Gemini API call failed: {e}")
+        return None
+
+
+class AgentRunner:
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0):
+        self.agent_id = agent_id
+        self.interactive = interactive
+        self.step_delay = step_delay
+        self.task_id = task_id
+        
+        self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
+        self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
+        
+        os.makedirs(AGENTS_DIR, exist_ok=True)
+        os.makedirs(WORKSPACES_DIR, exist_ok=True)
+        os.makedirs(self.workspace_dir, exist_ok=True)
+        
+        self.state = self.load_or_init_state()
+
+    def load_or_init_state(self):
+        state = load_json(self.state_file)
+        if state:
+            return state
+            
+        # Initialize new agent state
+        if not self.task_id:
+            print(f"Error: Agent state file not found for {self.agent_id} and no --task-id was specified.")
+            sys.exit(1)
+            
+        tasks_data = load_json(MOCK_TASKS_FILE)
+        if not tasks_data or self.task_id not in tasks_data["tasks"]:
+            print(f"Error: Task ID '{self.task_id}' not found in mock_tasks.json.")
+            sys.exit(1)
+            
+        task = tasks_data["tasks"][self.task_id]
+        first_step = task["steps"][0]
+        
+        state = {
+            "id": self.agent_id,
+            "parent_id": None,
+            "goal": task["goal"],
+            "status": "exploring",
+            "current_step": {
+                "step_id": first_step["step_id"],
+                "name": first_step["name"],
+                "description": first_step["description"]
+            },
+            "touched_files": list(first_step.get("touched_files", [])),
+            "tools_used": list(first_step.get("tools", [])),
+            "progress": 0,
+            "steps_completed": 0,
+            "task_id": self.task_id
+        }
+        save_json(self.state_file, state)
+        print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}'.")
+        return state
+
+    def check_tombstones(self, files, tools):
+        """Query tombstones.json to check if any upcoming command/file matches a known dead-end."""
+        tombstones = load_json(TOMBSTONES_FILE) or []
+        for t in tombstones:
+            # Check if any touched file or executed tool matches the tombstone
+            file_match = any(f in t.get("file_path", "") for f in files)
+            tool_match = any(tool == t.get("tool_used", "") for tool in tools)
+            if file_match and tool_match:
+                return t
+        return None
+
+    def execute_step(self):
+        # 1. Reload state to get potential background status changes (e.g. syncing)
+        self.state = load_json(self.state_file)
+        
+        if self.state["status"] == "dead":
+            print(f"Agent {self.agent_id} is DEAD. Exiting.")
+            sys.exit(0)
+            
+        if self.state["status"] == "syncing":
+            print(f"\n[SYNC REQUIRED] Agent {self.agent_id} has been PAUSED. Starting Negotiation Skill...")
+            self.perform_negotiation()
+            return
+
+        # 2. Progress task step
+        task_id = self.state.get("task_id")
+        tasks_data = load_json(MOCK_TASKS_FILE)
+        if not tasks_data or task_id not in tasks_data["tasks"]:
+            print(f"Error: Task data missing for task {task_id}.")
+            self.state["status"] = "completed"
+            save_json(self.state_file, self.state)
+            return
+            
+        task = tasks_data["tasks"][task_id]
+        steps = task["steps"]
+        completed_count = self.state["steps_completed"]
+        
+        if completed_count >= len(steps):
+            print(f"Agent {self.agent_id} has completed all steps of Task {task_id}.")
+            self.state["status"] = "completed"
+            self.state["progress"] = 100
+            save_json(self.state_file, self.state)
+            return
+            
+        current_step = steps[completed_count]
+        print(f"\n[Agent {self.agent_id}] Executing Step {current_step['step_id']}/{len(steps)}: {current_step['name']}")
+        print(f"  Description: {current_step['description']}")
+        
+        # Check for Tombstone warning
+        step_files = current_step.get("touched_files", [])
+        step_tools = current_step.get("tools", [])
+        
+        tombstone = self.check_tombstones(step_files, step_tools)
+        applied_workaround = False
+        
+        if tombstone:
+            print(f"  [!WARNING] Known Dead-end warning found in Tombstone database!")
+            print(f"  Blocker: {tombstone['error_message']}")
+            print(f"  Applying Workaround: {tombstone['fix_action']}")
+            # Simulate applying the workaround (e.g., swapping tools from gcc to clang)
+            if "gcc" in step_tools:
+                step_tools = [t if t != "gcc" else "clang" for t in step_tools]
+                applied_workaround = True
+                print(f"  Action: Swapped compilation tool from 'gcc' to 'clang'.")
+                
+        # Simulate execution / Touch files in local sandbox workspace
+        for filename in step_files:
+            file_path = os.path.join(self.workspace_dir, filename)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w') as f:
+                f.write(f"# Agent {self.agent_id} completed {current_step['name']} at {time.time()}\n")
+            print(f"  Touched sandbox file: {filename}")
+            
+        # Check if the step is a trap and we failed to apply the workaround
+        if current_step.get("is_trap") and not applied_workaround:
+            error_msg = current_step.get("trap_error", "Fatal compilation crash.")
+            fix_msg = current_step.get("trap_fix", "Use an alternative compiler.")
+            print(f"  [CRASH] Step execution failed: {error_msg}")
+            
+            # Write a tombstone
+            tombstones = load_json(TOMBSTONES_FILE) or []
+            new_tombstone = {
+                "file_path": step_files[0] if step_files else "unknown",
+                "tool_used": step_tools[0] if step_tools else "unknown",
+                "error_message": error_msg,
+                "fix_action": fix_msg,
+                "timestamp": time.time()
+            }
+            tombstones.append(new_tombstone)
+            save_json(TOMBSTONES_FILE, tombstones)
+            print(f"  [TOMBSTONE REGISTERED] Saved failure context to tombstones.json.")
+            
+            # Self-terminate
+            self.state["status"] = "dead"
+            save_json(self.state_file, self.state)
+            print(f"  Agent {self.agent_id} has terminated due to fatal error.")
+            sys.exit(0)
+            
+        # Wait step delay simulation
+        time.sleep(self.step_delay)
+        
+        # 3. Update agent state
+        self.state["steps_completed"] += 1
+        self.state["progress"] = int((self.state["steps_completed"] / len(steps)) * 100)
+        
+        # Collect touched files and tools
+        for f in step_files:
+            if f not in self.state["touched_files"]:
+                self.state["touched_files"].append(f)
+        for t in step_tools:
+            if t not in self.state["tools_used"]:
+                self.state["tools_used"].append(t)
+                
+        # Setup next step if available
+        if self.state["steps_completed"] < len(steps):
+            next_step = steps[self.state["steps_completed"]]
+            self.state["current_step"] = {
+                "step_id": next_step["step_id"],
+                "name": next_step["name"],
+                "description": next_step["description"]
+            }
+        else:
+            self.state["status"] = "completed"
+            self.state["current_step"] = None
+            
+        save_json(self.state_file, self.state)
+        print(f"Step completed. Progress: {self.state['progress']}%")
+
+    def perform_negotiation(self):
+        """Finds the active collision record and resolves it via LLM, Rules, or Interactive inputs."""
+        # Find collision file involving us
+        collision_file = None
+        collision_id = None
+        for filename in os.listdir(COLLISIONS_DIR):
+            if filename.startswith("collision_") and filename.endswith(".json"):
+                parts = filename.replace("collision_", "").replace(".json", "").split("_")
+                if self.agent_id in parts:
+                    collision_id = filename.replace("collision_", "").replace(".json", "")
+                    collision_file = os.path.join(COLLISIONS_DIR, filename)
+                    break
+                    
+        if not collision_file:
+            print(f"Error: Paused for syncing but no collision file found for Agent {self.agent_id}.")
+            self.state["status"] = "exploring"
+            save_json(self.state_file, self.state)
+            return
+            
+        # Acquire negotiation lock / check if already resolved by the peer
+        collision = load_json(collision_file)
+        if not collision:
+            return
+            
+        if collision["status"] == "resolved":
+            print(f"Collision resolved by peer. Reloading status...")
+            self.state = load_json(self.state_file)
+            return
+            
+        # We perform the negotiation
+        collision["status"] = "negotiating"
+        save_json(collision_file, collision)
+        
+        agent_a = collision["agent_a"]
+        agent_b = collision["agent_b"]
+        
+        peer_id = agent_b["id"] if agent_a["id"] == self.agent_id else agent_a["id"]
+        peer_state_file = os.path.join(AGENTS_DIR, f"agent_{peer_id}.json")
+        peer_state = load_json(peer_state_file)
+        
+        print("\n" + "="*50)
+        print("          NEGOTIATION CONVERSE PROTOCOL")
+        print("="*50)
+        print(f"Agent A (ID: {agent_a['id']}): Goal: {agent_a['goal']}")
+        print(f"  Progress: {agent_a['progress']}% | Current: {agent_a['current_step']['name']}")
+        print(f"Agent B (ID: {agent_b['id']}): Goal: {agent_b['goal']}")
+        print(f"  Progress: {agent_b['progress']}% | Current: {agent_b['current_step']['name']}")
+        print("-"*50)
+        
+        resolution = {}
+        action = None
+        reason = ""
+        
+        if self.interactive:
+            print("[INTERACTIVE MODE] Select resolution outcome:")
+            print(f"  1. Redundant: Terminate Agent A ({agent_a['id']}) - Agent B is ahead/survives.")
+            print(f"  2. Redundant: Terminate Agent B ({agent_b['id']}) - Agent A is ahead/survives.")
+            print("  3. Complementary: Keep both alive, share state information and resume.")
+            
+            while True:
+                choice = input("Enter choice (1, 2, or 3): ").strip()
+                if choice == "1":
+                    action = "kill_a"
+                    reason = "User manually terminated Agent A (redundant subtask)."
+                    break
+                elif choice == "2":
+                    action = "kill_b"
+                    reason = "User manually terminated Agent B (redundant subtask)."
+                    break
+                elif choice == "3":
+                    action = "keep_both"
+                    reason = "User manually marked goals as complementary. Resuming both."
+                    break
+                else:
+                    print("Invalid input. Select 1, 2, or 3.")
+        else:
+            # Try Gemini API if key is available
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if api_key:
+                print("Invoking Gemini LLM Negotiation engine...")
+                prompt = (
+                    f"You are the Swarm Supervisor coordinating two autonomous coding agents:\n"
+                    f"Agent A: ID={agent_a['id']}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
+                    f"Agent B: ID={agent_b['id']}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
+                    f"Evaluate if their goals are redundant (overlapping work on same file/subtask) or complementary.\n"
+                    f"If redundant, terminate the one with less progress. If complementary, keep both.\n"
+                    f"Respond strictly in JSON with keys 'action' (must be one of 'kill_a', 'kill_b', 'keep_both') and 'reason' (text explanation)."
+                )
+                res = call_gemini_api(prompt)
+                if res and "action" in res:
+                    action = res["action"]
+                    reason = res.get("reason", "LLM determined resolution.")
+                    print(f"Gemini Decision: {action.upper()}")
+                    print(f"Reason: {reason}")
+            
+            # Rule-based fallback if no API key or API call failed
+            if not action:
+                print("Running local deterministic deconfliction rules...")
+                # Calculate simple overlap logic
+                is_redundant = collision["similarity_metrics"]["goal_cosine"] > 0.6
+                if is_redundant:
+                    if agent_a["progress"] >= agent_b["progress"]:
+                        action = "kill_b"
+                        reason = f"Deterministic fallback: Redundancy detected. Agent A ({agent_a['id']}) has higher/equal progress ({agent_a['progress']}%) than Agent B ({agent_b['progress']}%)."
+                    else:
+                        action = "kill_a"
+                        reason = f"Deterministic fallback: Redundancy detected. Agent B ({agent_b['id']}) has higher progress ({agent_b['progress']}%) than Agent A ({agent_a['id']}%)."
+                else:
+                    action = "keep_both"
+                    reason = "Deterministic fallback: Goals deemed complementary. Resuming both."
+                    
+        # Apply resolution
+        if action == "kill_a":
+            agent_a["status"] = "dead"
+            agent_b["status"] = "exploring"
+            # Simulate writing context sharing records to B's workspace
+            self.share_knowledge_files(agent_a["id"], agent_b["id"])
+        elif action == "kill_b":
+            agent_a["status"] = "exploring"
+            agent_b["status"] = "dead"
+            self.share_knowledge_files(agent_b["id"], agent_a["id"])
+        else:  # keep_both
+            agent_a["status"] = "exploring"
+            agent_b["status"] = "exploring"
+            
+        # Save states
+        save_json(os.path.join(AGENTS_DIR, f"agent_{agent_a['id']}.json"), agent_a)
+        save_json(os.path.join(AGENTS_DIR, f"agent_{agent_b['id']}.json"), agent_b)
+        
+        # Write resolved collision data
+        collision["status"] = "resolved"
+        collision["action_taken"] = action
+        collision["reasoning"] = reason
+        collision["negotiation_log"].append({
+            "timestamp": time.time(),
+            "action": action,
+            "reason": reason
+        })
+        save_json(collision_file, collision)
+        
+        print(f"Negotiation Complete. Outcome: {action.upper()}")
+        print(f"Reason: {reason}")
+        print("="*50 + "\n")
+        
+        # Reload local state
+        self.state = load_json(self.state_file)
+
+    def share_knowledge_files(self, loser_id, survivor_id):
+        """Copies any files created by the losing agent to the survivor's workspace."""
+        loser_ws = os.path.join(WORKSPACES_DIR, f"agent_{loser_id}")
+        survivor_ws = os.path.join(WORKSPACES_DIR, f"agent_{survivor_id}")
+        
+        if os.path.exists(loser_ws):
+            print(f"  [State Transfer] Migrating partial files from Agent {loser_id} to Agent {survivor_id}...")
+            for root, dirs, files in os.walk(loser_ws):
+                for file in files:
+                    src = os.path.join(root, file)
+                    rel = os.path.relpath(src, loser_ws)
+                    dest = os.path.join(survivor_ws, rel)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    try:
+                        with open(src, 'r') as f_in:
+                            content = f_in.read()
+                        with open(dest, 'w') as f_out:
+                            f_out.write(content)
+                            f_out.write(f"# Inherited from Agent {loser_id} during collision resolution.\n")
+                    except Exception as e:
+                        print(f"    Failed to copy {file}: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Proximity Swarm - Agent Execution Runner")
+    parser.add_argument("--agent-id", required=True, help="Unique 3-digit agent ID")
+    parser.add_argument("--task-id", help="Task ID from mock_tasks.json to initialize agent with")
+    parser.add_argument("--interactive", action="store_true", help="Toggle interactive mode for collision resolutions")
+    parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
+    parser.add_argument("--steps", type=int, default=10, help="Max number of execution steps to run")
+    args = parser.parse_args()
+    
+    runner = AgentRunner(
+        agent_id=args.agent_id, 
+        task_id=args.task_id, 
+        interactive=args.interactive,
+        step_delay=args.step_delay
+    )
+    
+    print(f"Starting Agent {args.agent_id} runner...")
+    for _ in range(args.steps):
+        runner.execute_step()
+        if runner.state["status"] in ["completed", "dead"]:
+            break
+
+
+if __name__ == "__main__":
+    main()

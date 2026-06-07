@@ -175,5 +175,34 @@ Based on academic literature and open-source multi-agent frameworks (e.g., OpenA
 * **The Problem:** If multiple agents are spawned simultaneously, they might spend their first 5-10 steps executing identical setup phases before their trajectories drift close enough for the Proximity Engine to detect a collision.
 * **The Solution:** Implement a **Goal Deconfliction Queue** in the tracker. When agents are initialized, the supervisor assigns subtle parameter offsets (e.g., searching different sub-queries, using different URLs, or analyzing separate files) so they start their trajectories on divergent, non-overlapping paths.
 
+---
+
+## 8. Refined Implementation Decisions (Phase 1)
+
+During the alignment phase, the following concrete architectural decisions were finalized for the Phase 1 implementation:
+
+### A. State Tracking & Coordinate Storage
+* Instead of a SQL database, the trajectory space state is tracked entirely via **JSON files** on the local filesystem under `.proximity_swarm/agents/agent_<id>.json`.
+* This keeps agent context inspection human-readable and integrates easily with local file-checking tools.
+
+### B. Proximity Engine Math
+* **Goal Similarity:** Uses a self-contained, zero-dependency **TF-IDF Vectorizer & Cosine Similarity** calculation in Python, running fully offline.
+* **Workspace & Tool Overlaps:** Computed using **Jaccard Similarity** coefficients on sets of touched file paths and executed tools.
+* **Weights:** $w_1 = 0.5$ (goals), $w_2 = 0.3$ (files), $w_3 = 0.2$ (tools).
+
+### C. Collision Pausing
+* The background monitor script (`proximity_monitor.py`) pauses agents by updating their status field to `"syncing"` and writing deconfliction files under `.proximity_swarm/collisions/collision_<idA>_<idB>.json`.
+* The runner scripts poll their own JSON files between task steps to detect this pause state.
+
+### D. Hybrid & Interactive Negotiation
+* The negotiation logic supports three modes:
+  1. **LLM Mode:** Uses the Gemini API to let the agent states converse and decide outcomes if `GEMINI_API_KEY` is present.
+  2. **Rule-Based Fallback:** If offline/no key is found, resolves conflicts deterministically (e.g., progress-based selection).
+  3. **Interactive Mode:** Enabled via a `--interactive` CLI flag, prompting the user in the terminal to manually pick collision resolutions.
+
+### E. Spawning Mechanism
+* Spawning is file-driven: the parent agent writes a `spawn_request` block inside its JSON state file. The background monitor detects the block, initializes a new agent JSON state, creates a dedicated workspace subdirectory under `.proximity_swarm/workspaces/agent_<child_id>/`, and removes the request block from the parent.
+
+
 
 

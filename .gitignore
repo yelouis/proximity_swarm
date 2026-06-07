@@ -141,3 +141,6 @@ cython_debug/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Proximity Swarm local runtime state
+.proximity_swarm/

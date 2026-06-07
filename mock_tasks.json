@@ -1,0 +1,112 @@
+{
+  "tasks": {
+    "task_jwt_auth": {
+      "id": "task_jwt_auth",
+      "goal": "Implement JWT authentication token generation and verification routines in auth.py.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Write JWT sign function",
+          "description": "Implement the JWT signature algorithm using secret keys in auth.py",
+          "touched_files": ["src/auth.py"],
+          "tools": ["edit_file"]
+        },
+        {
+          "step_id": 2,
+          "name": "Write JWT verify function",
+          "description": "Implement token decoding, expiration check, and validation in auth.py",
+          "touched_files": ["src/auth.py"],
+          "tools": ["edit_file"]
+        },
+        {
+          "step_id": 3,
+          "name": "Compile cryptography C extension",
+          "description": "Compile the native cryptography dependencies to optimize token signing speed",
+          "touched_files": ["src/crypt_ext.c"],
+          "tools": ["gcc", "make"],
+          "is_trap": true,
+          "trap_error": "gcc: error: unsupported compiler flag -isysroot on macOS. Try using clang instead.",
+          "trap_fix": "Use clang instead of gcc for compiling C extensions on macOS."
+        },
+        {
+          "step_id": 4,
+          "name": "Write JWT unit tests",
+          "description": "Write and run unit tests for token signing and parsing in test_auth.py",
+          "touched_files": ["tests/test_auth.py"],
+          "tools": ["pytest"]
+        }
+      ]
+    },
+    "task_jwt_signature_verification": {
+      "id": "task_jwt_signature_verification",
+      "goal": "Validate JWT signature key rotation and token verification algorithms in auth.py.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Write key rotation validator",
+          "description": "Create a function to refresh public keys and validate signatures in auth.py",
+          "touched_files": ["src/auth.py"],
+          "tools": ["edit_file"]
+        },
+        {
+          "step_id": 2,
+          "name": "Verify token manually",
+          "description": "Write a debug script to verify token signatures using public key sets",
+          "touched_files": ["src/debug_verify.py"],
+          "tools": ["run_python"]
+        },
+        {
+          "step_id": 3,
+          "name": "Compile cryptography C extension",
+          "description": "Compile the native cryptography dependencies to optimize token signing speed",
+          "touched_files": ["src/crypt_ext.c"],
+          "tools": ["gcc", "make"],
+          "is_trap": true,
+          "trap_error": "gcc: error: unsupported compiler flag -isysroot on macOS. Try using clang instead.",
+          "trap_fix": "Use clang instead of gcc for compiling C extensions on macOS."
+        },
+        {
+          "step_id": 4,
+          "name": "Run verification benchmarks",
+          "description": "Benchmark signature verification times under high load scenarios",
+          "touched_files": ["tests/benchmark.py"],
+          "tools": ["run_python"]
+        }
+      ]
+    },
+    "task_database_migration": {
+      "id": "task_database_migration",
+      "goal": "Migrate user database schema from SQLite to PostgreSQL database format.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Write migration mapping schema",
+          "description": "Define table mapping and schema migration steps in migrate.py",
+          "touched_files": ["src/migrate.py"],
+          "tools": ["edit_file"]
+        },
+        {
+          "step_id": 2,
+          "name": "Export SQLite db records",
+          "description": "Dump SQLite tables to a temporary JSON interchange format",
+          "touched_files": ["src/db_dump.json"],
+          "tools": ["sqlite3", "run_python"]
+        },
+        {
+          "step_id": 3,
+          "name": "Import into PostgreSQL",
+          "description": "Populate PostgreSQL tables with dumped records using migration script",
+          "touched_files": ["src/migrate.py"],
+          "tools": ["psql", "run_python"]
+        },
+        {
+          "step_id": 4,
+          "name": "Run migrations health check",
+          "description": "Execute database checks to verify migrations were complete and correct",
+          "touched_files": ["tests/test_db.py"],
+          "tools": ["pytest"]
+        }
+      ]
+    }
+  }
+}
