@@ -70,7 +70,6 @@ def calculate_tfidf_cosine_similarity(doc1, doc2, corpus):
     idf = {}
     for term in vocab:
         df = sum(1 for tokens in all_tokens_corpus if term in tokens)
-        # Avoid division by zero
         idf[term] = math.log((1 + N) / (1 + df)) + 1
         
     def get_tfidf_vector(tokens):
@@ -109,27 +108,22 @@ def calculate_proximity(agent1, agent2, corpus):
     Computes composite distance metric between two agents.
     Returns (distance, cosine_sim, file_jaccard, tool_jaccard)
     """
-    # Goals Cosine Similarity
     goal1 = agent1.get("goal", "") + " " + agent1.get("current_step", {}).get("description", "")
     goal2 = agent2.get("goal", "") + " " + agent2.get("current_step", {}).get("description", "")
     cosine_sim = calculate_tfidf_cosine_similarity(goal1, goal2, corpus)
     
-    # Touched Files Jaccard Similarity
     files1 = agent1.get("touched_files", [])
     files2 = agent2.get("touched_files", [])
     file_jaccard = calculate_jaccard_similarity(files1, files2)
     
-    # Tools Jaccard Similarity
     tools1 = agent1.get("tools_used", [])
     tools2 = agent2.get("tools_used", [])
     tool_jaccard = calculate_jaccard_similarity(tools1, tools2)
     
-    # Distance components (distance = 1 - similarity)
     d_goal = 1.0 - cosine_sim
     d_workspace = 1.0 - file_jaccard
     d_tools = 1.0 - tool_jaccard
     
-    # Weights: w1=0.5 (goal), w2=0.3 (workspace), w3=0.2 (tools)
     w1, w2, w3 = 0.5, 0.3, 0.2
     distance = w1 * d_goal + w2 * d_workspace + w3 * d_tools
     
@@ -137,7 +131,7 @@ def calculate_proximity(agent1, agent2, corpus):
 
 
 def load_active_agents():
-    """Load states of all active agents."""
+    """Load states of all active agents (including syncing and pending termination)."""
     agents = []
     if not os.path.exists(AGENTS_DIR):
         return agents
@@ -148,7 +142,7 @@ def load_active_agents():
             try:
                 with open(filepath, 'r') as f:
                     data = json.load(f)
-                    if data.get("status") in ["exploring", "syncing"]:
+                    if data.get("status") in ["exploring", "syncing", "pending_termination"]:
                         agents.append(data)
             except Exception as e:
                 logging.error(f"Error loading agent file {filename}: {e}")
@@ -172,7 +166,6 @@ def handle_spawn_requests(agents):
         if spawn_req:
             logging.info(f"Agent {agent['id']} requested to spawn a sub-agent with goal: {spawn_req.get('goal')}")
             
-            # Find next agent ID
             existing_ids = []
             for filename in os.listdir(AGENTS_DIR):
                 if filename.startswith("agent_") and filename.endswith(".json"):
@@ -184,7 +177,6 @@ def handle_spawn_requests(agents):
             next_id = max(existing_ids) + 1 if existing_ids else 1
             child_id = f"{next_id:03d}"
             
-            # Create child state
             child_agent = {
                 "id": child_id,
                 "parent_id": agent["id"],
@@ -201,14 +193,15 @@ def handle_spawn_requests(agents):
                 "steps_completed": 0
             }
             
-            # Provision child workspace
+            # Inherit offset suffix if present
+            if agent.get("offset_suffix"):
+                child_agent["offset_suffix"] = agent["offset_suffix"]
+            
             child_ws = os.path.join(WORKSPACES_DIR, f"agent_{child_id}")
             os.makedirs(child_ws, exist_ok=True)
             
-            # Write child state
             save_agent_state(child_agent)
             
-            # Update parent state to clear spawn request
             agent["spawn_request"] = None
             if "children" not in agent:
                 agent["children"] = []
@@ -218,23 +211,132 @@ def handle_spawn_requests(agents):
             logging.info(f"Spawned Child Agent {child_id} for Parent Agent {agent['id']}.")
 
 
+def evaluate_consensus_gate(agents):
+    """
+    Consensus-Gate Evaluation (Extinction Prevention)
+    Verify if termination requests can be approved safely without losing the target task coverage.
+    """
+    # Gather corpus of goals for similarity checks
+    corpus = []
+    for a in agents:
+        goal_str = a.get("goal", "") + " " + a.get("current_step", {}).get("description", "")
+        corpus.append(goal_str)
+
+    for agent in agents:
+        if agent["status"] == "pending_termination":
+            logging.info(f"Supervisor evaluating termination request for Agent {agent['id']}...")
+            
+            # Look for other active agents covering the same/similar goals
+            task_id = agent.get("task_id")
+            covered = False
+            covering_agent_id = None
+            
+            for other in agents:
+                if other["id"] == agent["id"]:
+                    continue
+                if other["status"] not in ["exploring", "syncing"]:
+                    continue
+                    
+                # Coverage criteria: same task_id, or high cosine similarity
+                same_task = task_id and (other.get("task_id") == task_id)
+                
+                goal1 = agent.get("goal", "") + " " + agent.get("current_step", {}).get("description", "")
+                goal2 = other.get("goal", "") + " " + other.get("current_step", {}).get("description", "")
+                goal_similarity = calculate_tfidf_cosine_similarity(goal1, goal2, corpus)
+                
+                similar_goal = goal_similarity > 0.6
+                
+                if same_task or similar_goal:
+                    covered = True
+                    covering_agent_id = other["id"]
+                    break
+            
+            if covered:
+                # Safe to terminate: another active agent is covering this branch
+                agent["status"] = "dead"
+                save_agent_state(agent)
+                logging.info(
+                    f"[CONSENSUS APPROVED] Agent {agent['id']} termination approved. "
+                    f"Branch covered by active Agent {covering_agent_id}."
+                )
+            else:
+                # Extinction danger! Block termination and force agent to resume exploring
+                agent["status"] = "exploring"
+                save_agent_state(agent)
+                logging.warning(
+                    f"[CONSENSUS OVERRIDE] Extinction Prevention triggered! Rejected termination for Agent {agent['id']} "
+                    f"as it is the last active agent covering its goal/task."
+                )
+
+
+def run_cascading_kills():
+    """
+    Cascading Kill Switch (Runaway Prevention)
+    Recursively kills all descendants of dead parents.
+    """
+    if not os.path.exists(AGENTS_DIR):
+        return
+        
+    # Load all agent states in workspace
+    all_agents = {}
+    for filename in os.listdir(AGENTS_DIR):
+        if filename.endswith(".json"):
+            try:
+                filepath = os.path.join(AGENTS_DIR, filename)
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                    all_agents[data["id"]] = data
+            except Exception:
+                pass
+                
+    def cascade(parent_id):
+        parent = all_agents.get(parent_id)
+        if not parent:
+            return
+            
+        children = parent.get("children", [])
+        for child_id in children:
+            child = all_agents.get(child_id)
+            if child and child["status"] != "dead":
+                child["status"] = "dead"
+                save_agent_state(child)
+                logging.warning(
+                    f"[CASCADING KILL] Supervisor killed child Agent {child_id} "
+                    f"recursively because parent Agent {parent_id} is dead."
+                )
+                cascade(child_id)  # recurse
+                
+    # Run cascade check starting from all dead agents
+    for agent_id, agent in list(all_agents.items()):
+        if agent["status"] == "dead":
+            cascade(agent_id)
+
+
 def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
-    """Main polling loop to calculate proximity and detect collisions."""
-    logging.info("Proximity Monitor started. Monitoring trajectory space...")
+    """Main polling loop to calculate proximity and supervise swarm execution."""
+    logging.info("V2 Proximity Supervisor started. Coordinating swarm coordinates...")
     logging.info(f"Settings: Poll Interval = {poll_interval}s, Collision Threshold = {collision_threshold}")
     
     while True:
         try:
+            # Defensive directory creation
             os.makedirs(AGENTS_DIR, exist_ok=True)
             os.makedirs(COLLISIONS_DIR, exist_ok=True)
             os.makedirs(WORKSPACES_DIR, exist_ok=True)
             
+            # Load active agents
             agents = load_active_agents()
             
-            # Handle any pending spawn requests first
+            # 1. Handle consensus-gate evaluations (extinction prevention)
+            evaluate_consensus_gate(agents)
+            
+            # 2. Run cascading kills switch (runaway prevention)
+            run_cascading_kills()
+            
+            # Reload agents to include adjustments and spawns
+            agents = load_active_agents()
             handle_spawn_requests(agents)
             
-            # Re-load agents to include newly spawned ones
             agents = load_active_agents()
             
             # Build corpus of goals/steps for TF-IDF
@@ -245,36 +347,26 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                 
             # Check for collisions pairwise
             n = len(agents)
-            collided_pairs = set()
-            
             for i in range(n):
                 for j in range(i + 1, n):
                     a1 = agents[i]
                     a2 = agents[j]
                     
-                    # Compute distance
+                    if a1['status'] == "pending_termination" or a2['status'] == "pending_termination":
+                        continue
+                        
                     distance, cosine_sim, file_jaccard, tool_jaccard = calculate_proximity(a1, a2, corpus)
                     
-                    logging.debug(
-                        f"Pair ({a1['id']}, {a2['id']}): Distance={distance:.3f} | GoalSim={cosine_sim:.3f} | FileSim={file_jaccard:.3f}"
-                    )
-                    
                     if distance < collision_threshold:
-                        # Collision detected!
-                        collided_pairs.add((a1['id'], a2['id']))
-                        
-                        # Only trigger sync if both are actively exploring
                         if a1['status'] == "exploring" and a2['status'] == "exploring":
                             logging.warning(
                                 f"COLLISION DETECTED between Agent {a1['id']} and Agent {a2['id']}! "
                                 f"Distance: {distance:.3f} (GoalSim: {cosine_sim:.2f}, FileSim: {file_jaccard:.2f})"
                             )
                             
-                            # Update statuses to syncing
                             a1['status'] = "syncing"
                             a2['status'] = "syncing"
                             
-                            # Create collision JSON file
                             collision_id = f"{a1['id']}_{a2['id']}"
                             collision_file = os.path.join(COLLISIONS_DIR, f"collision_{collision_id}.json")
                             
@@ -301,14 +393,14 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                             logging.info(f"Created collision file: collision_{collision_id}.json. Paused both agents.")
             
         except Exception as e:
-            logging.error(f"Error in monitor loop: {e}", exc_info=True)
+            logging.error(f"Error in supervisor loop: {e}", exc_info=True)
             
         time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Proximity Swarm - Background Monitor")
+    parser = argparse.ArgumentParser(description="Proximity Swarm - V2 Supervisor Monitor")
     parser.add_argument("--interval", type=float, default=1.5, help="Polling interval in seconds")
     parser.add_argument("--threshold", type=float, default=0.5, help="Collision distance threshold (lower = closer)")
     args = parser.parse_args()
@@ -316,5 +408,5 @@ if __name__ == "__main__":
     try:
         monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold)
     except KeyboardInterrupt:
-        logging.info("Proximity Monitor stopped by user.")
+        logging.info("Supervisor stopped by user.")
         sys.exit(0)

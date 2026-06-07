@@ -69,11 +69,12 @@ def call_gemini_api(prompt):
 
 
 class AgentRunner:
-    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0):
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None):
         self.agent_id = agent_id
         self.interactive = interactive
         self.step_delay = step_delay
         self.task_id = task_id
+        self.offset_suffix = offset_suffix
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
         self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
@@ -83,6 +84,15 @@ class AgentRunner:
         os.makedirs(self.workspace_dir, exist_ok=True)
         
         self.state = self.load_or_init_state()
+
+    def apply_offset_to_files(self, files):
+        if not self.offset_suffix:
+            return list(files)
+        result = []
+        for f in files:
+            base, ext = os.path.splitext(f)
+            result.append(f"{base}_{self.offset_suffix}{ext}")
+        return result
 
     def load_or_init_state(self):
         state = load_json(self.state_file)
@@ -101,6 +111,7 @@ class AgentRunner:
             
         task = tasks_data["tasks"][self.task_id]
         first_step = task["steps"][0]
+        first_files = self.apply_offset_to_files(first_step.get("touched_files", []))
         
         state = {
             "id": self.agent_id,
@@ -112,14 +123,18 @@ class AgentRunner:
                 "name": first_step["name"],
                 "description": first_step["description"]
             },
-            "touched_files": list(first_step.get("touched_files", [])),
+            "touched_files": first_files,
             "tools_used": list(first_step.get("tools", [])),
             "progress": 0,
             "steps_completed": 0,
             "task_id": self.task_id
         }
+        
+        if self.offset_suffix:
+            state["offset_suffix"] = self.offset_suffix
+            
         save_json(self.state_file, state)
-        print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}'.")
+        print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}' (Offset: {self.offset_suffix}).")
         return state
 
     def check_tombstones(self, files, tools):
@@ -134,12 +149,25 @@ class AgentRunner:
         return None
 
     def execute_step(self):
-        # 1. Reload state to get potential background status changes (e.g. syncing)
+        # 1. Reload state to get potential background status changes
         self.state = load_json(self.state_file)
         
         if self.state["status"] == "dead":
             print(f"Agent {self.agent_id} is DEAD. Exiting.")
             sys.exit(0)
+            
+        if self.state["status"] == "pending_termination":
+            print(f"\n[PAUSED] Agent {self.agent_id} is pending termination approval from Supervisor...")
+            while True:
+                time.sleep(1.0)
+                self.state = load_json(self.state_file)
+                if self.state["status"] == "dead":
+                    print(f"Agent {self.agent_id} termination APPROVED by Supervisor. Exiting.")
+                    sys.exit(0)
+                if self.state["status"] == "exploring":
+                    print(f"Agent {self.agent_id} termination REJECTED by Supervisor (extinction prevention). Resuming.")
+                    break
+            return
             
         if self.state["status"] == "syncing":
             print(f"\n[SYNC REQUIRED] Agent {self.agent_id} has been PAUSED. Starting Negotiation Skill...")
@@ -170,8 +198,8 @@ class AgentRunner:
         print(f"\n[Agent {self.agent_id}] Executing Step {current_step['step_id']}/{len(steps)}: {current_step['name']}")
         print(f"  Description: {current_step['description']}")
         
-        # Check for Tombstone warning
-        step_files = current_step.get("touched_files", [])
+        # Check for Tombstone warning (with applied offset if present)
+        step_files = self.apply_offset_to_files(current_step.get("touched_files", []))
         step_tools = current_step.get("tools", [])
         
         tombstone = self.check_tombstones(step_files, step_tools)
@@ -181,7 +209,6 @@ class AgentRunner:
             print(f"  [!WARNING] Known Dead-end warning found in Tombstone database!")
             print(f"  Blocker: {tombstone['error_message']}")
             print(f"  Applying Workaround: {tombstone['fix_action']}")
-            # Simulate applying the workaround (e.g., swapping tools from gcc to clang)
             if "gcc" in step_tools:
                 step_tools = [t if t != "gcc" else "clang" for t in step_tools]
                 applied_workaround = True
@@ -214,11 +241,11 @@ class AgentRunner:
             save_json(TOMBSTONES_FILE, tombstones)
             print(f"  [TOMBSTONE REGISTERED] Saved failure context to tombstones.json.")
             
-            # Self-terminate
-            self.state["status"] = "dead"
+            # Request termination
+            self.state["status"] = "pending_termination"
             save_json(self.state_file, self.state)
-            print(f"  Agent {self.agent_id} has terminated due to fatal error.")
-            sys.exit(0)
+            print(f"  Agent {self.agent_id} is pending termination approval from Supervisor.")
+            return
             
         # Wait step delay simulation
         time.sleep(self.step_delay)
@@ -305,19 +332,19 @@ class AgentRunner:
         
         if self.interactive:
             print("[INTERACTIVE MODE] Select resolution outcome:")
-            print(f"  1. Redundant: Terminate Agent A ({agent_a['id']}) - Agent B is ahead/survives.")
-            print(f"  2. Redundant: Terminate Agent B ({agent_b['id']}) - Agent A is ahead/survives.")
+            print(f"  1. Redundant: Propose terminating Agent A ({agent_a['id']}) - Agent B is ahead.")
+            print(f"  2. Redundant: Propose terminating Agent B ({agent_b['id']}) - Agent A is ahead.")
             print("  3. Complementary: Keep both alive, share state information and resume.")
             
             while True:
                 choice = input("Enter choice (1, 2, or 3): ").strip()
                 if choice == "1":
                     action = "kill_a"
-                    reason = "User manually terminated Agent A (redundant subtask)."
+                    reason = "User manually proposed Agent A termination."
                     break
                 elif choice == "2":
                     action = "kill_b"
-                    reason = "User manually terminated Agent B (redundant subtask)."
+                    reason = "User manually proposed Agent B termination."
                     break
                 elif choice == "3":
                     action = "keep_both"
@@ -335,7 +362,7 @@ class AgentRunner:
                     f"Agent A: ID={agent_a['id']}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
                     f"Agent B: ID={agent_b['id']}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
                     f"Evaluate if their goals are redundant (overlapping work on same file/subtask) or complementary.\n"
-                    f"If redundant, terminate the one with less progress. If complementary, keep both.\n"
+                    f"If redundant, propose terminating the one with less progress. If complementary, keep both.\n"
                     f"Respond strictly in JSON with keys 'action' (must be one of 'kill_a', 'kill_b', 'keep_both') and 'reason' (text explanation)."
                 )
                 res = call_gemini_api(prompt)
@@ -353,23 +380,22 @@ class AgentRunner:
                 if is_redundant:
                     if agent_a["progress"] >= agent_b["progress"]:
                         action = "kill_b"
-                        reason = f"Deterministic fallback: Redundancy detected. Agent A ({agent_a['id']}) has higher/equal progress ({agent_a['progress']}%) than Agent B ({agent_b['progress']}%)."
+                        reason = f"Redundancy detected. Propose Agent B ({agent_b['id']}) termination."
                     else:
                         action = "kill_a"
-                        reason = f"Deterministic fallback: Redundancy detected. Agent B ({agent_b['id']}) has higher progress ({agent_b['progress']}%) than Agent A ({agent_a['id']}%)."
+                        reason = f"Redundancy detected. Propose Agent A ({agent_a['id']}) termination."
                 else:
                     action = "keep_both"
-                    reason = "Deterministic fallback: Goals deemed complementary. Resuming both."
+                    reason = "Goals deemed complementary. Resuming both."
                     
-        # Apply resolution
+        # Apply resolution (setting to pending_termination instead of dead)
         if action == "kill_a":
-            agent_a["status"] = "dead"
+            agent_a["status"] = "pending_termination"
             agent_b["status"] = "exploring"
-            # Simulate writing context sharing records to B's workspace
             self.share_knowledge_files(agent_a["id"], agent_b["id"])
         elif action == "kill_b":
             agent_a["status"] = "exploring"
-            agent_b["status"] = "dead"
+            agent_b["status"] = "pending_termination"
             self.share_knowledge_files(agent_b["id"], agent_a["id"])
         else:  # keep_both
             agent_a["status"] = "exploring"
@@ -427,13 +453,15 @@ def main():
     parser.add_argument("--interactive", action="store_true", help="Toggle interactive mode for collision resolutions")
     parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
     parser.add_argument("--steps", type=int, default=10, help="Max number of execution steps to run")
+    parser.add_argument("--offset-suffix", help="Filename offset suffix to apply during step execution")
     args = parser.parse_args()
     
     runner = AgentRunner(
         agent_id=args.agent_id, 
         task_id=args.task_id, 
         interactive=args.interactive,
-        step_delay=args.step_delay
+        step_delay=args.step_delay,
+        offset_suffix=args.offset_suffix
     )
     
     print(f"Starting Agent {args.agent_id} runner...")
