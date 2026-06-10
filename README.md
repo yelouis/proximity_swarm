@@ -4,6 +4,13 @@ Proximity Swarm is an agentic framework designed to coordinate a swarm of autono
 
 For a detailed breakdown of the concept, architecture, and roadmap, please see the [Brainstorming Document](brainstorming.md).
 
+## The Analogy: Git for LLM Trajectories
+
+In addition to Conway's Game of Life dynamics, Proximity Swarm acts as a **Git-like Version Control System for Agent Reasoning Trees**:
+*   **Branching (Spawning / Underpopulation):** When an agent needs help or has parallel paths, it forks a new branch (spawns a child agent) to explore a sub-task in an isolated workspace.
+*   **Merge Conflicts (Collisions / Overpopulation):** When two agents drift too close in goal and file space, it triggers a merge conflict. The agents hold a negotiation dialogue to resolve the conflict (exchanging knowledge, or deleting/terminating the redundant branch).
+*   **Tombstones (Bug tags / Reverts):** When an agent hits a dead-end (compiler error, dependency bug), it commits a "Tombstone" record to the shared repository. Other agents check this index before running tools to steer their trajectories away from the failure.
+
 ## Core Concepts
 
 - **Trajectory Space:** The shared grid/space where agents register their paths, goals, and thoughts.

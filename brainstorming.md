@@ -8,13 +8,20 @@ Proximity Swarm is an agentic framework designed to coordinate a swarm of autono
 
 In a traditional agent swarm, agents work either completely in parallel (leading to duplicate work) or through a rigid hierarchical structure (rigid manager-worker patterns). 
 
-**Proximity Swarm** treats agents as cells living in a high-dimensional **Trajectory Space**. 
+**Proximity Swarm** treats agents as cells living in a high-dimensional **Trajectory Space**, drawing from two main analogies:
+
+### Analogy A: Cellular Automata (Conway's Game of Life)
 * **The Grid:** The "board" is a shared global semantic space where agents publish their trajectories (goals, thoughts, tool executions, and findings).
 * **Proximity:** Two agents are "neighbors" if their goal embeddings, tool usages, or visited directories are semantically or structurally close.
-* **Cellular Rules (Game of Life):**
+* **Cellular Rules:**
   * **Overpopulation (Redundancy):** If too many agents are working on the same subtask in the same workspace, they "die" (self-terminate) to save compute.
   * **Underpopulation (Isolation):** If an agent is alone and making slow progress, it can "reproduce" (spawn specialized sub-agents) to explore surrounding paths.
   * **Symbiosis (Converse & Learn):** When agents get close, they pause, share memories, and accelerate each other or redirect their trajectories to avoid traps.
+
+### Analogy B: Git for LLM Trajectories (Reasoning Version Control)
+* **Branching (Spawning):** Spawning a sub-agent is akin to a `git branch` (or `git checkout -b`) to isolate and solve a subtask in a clean branch workspace.
+* **Merge Conflicts (Collisions):** Collisions are merge conflicts. When two agents drift close in workspace and goal coordinates, it triggers a negotiation dialogue (conflict resolution) to merge knowledge or discard the redundant branch.
+* **Tombstones (Bug Tags):** Failed steps write failure signatures to a shared `tombstones.json` index, serving as locked bug/revert tags. Active branches check this index to steer their reasoning trajectories away from the hazard.
 
 ---
 
