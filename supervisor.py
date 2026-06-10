@@ -21,7 +21,7 @@ def clean_state():
     os.makedirs(STATE_DIR, exist_ok=True)
 
 
-def run_redundant_demo(interactive=False, deconflict=False):
+def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0):
     """
     Launches two agents assigned to the same task (redundancy test).
     If deconflict is enabled, applies goal deconfliction offsets to their files.
@@ -31,6 +31,7 @@ def run_redundant_demo(interactive=False, deconflict=False):
     print("\n" + "="*60)
     print(f"  STARTING PROXIMITY SWARM V2 DEMO")
     print(f"  Redundant collision check | Deconfliction: {deconflict} | Interactive: {interactive}")
+    print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s")
     print("="*60 + "\n")
     
     # 1. Start the background Supervisor Monitor process
@@ -56,26 +57,34 @@ def run_redundant_demo(interactive=False, deconflict=False):
         sys.executable, "agent_runner.py", 
         "--agent-id", agent_a_id, 
         "--task-id", "task_jwt_auth", 
-        "--step-delay", "2.0", 
+        "--step-delay", str(step_delay), 
         "--steps", "5"
     ]
     if offset_a:
         cmd_a.extend(["--offset-suffix", offset_a])
     if interactive:
         cmd_a.append("--interactive")
+    if llm_provider:
+        cmd_a.extend(["--llm-provider", llm_provider])
+    if ollama_model:
+        cmd_a.extend(["--ollama-model", ollama_model])
         
     # Run Agent B (Task: task_jwt_auth)
     cmd_b = [
         sys.executable, "agent_runner.py", 
         "--agent-id", agent_b_id, 
         "--task-id", "task_jwt_auth", 
-        "--step-delay", "2.0", 
+        "--step-delay", str(step_delay), 
         "--steps", "5"
     ]
     if offset_b:
         cmd_b.extend(["--offset-suffix", offset_b])
     if interactive:
         cmd_b.append("--interactive")
+    if llm_provider:
+        cmd_b.extend(["--llm-provider", llm_provider])
+    if ollama_model:
+        cmd_b.extend(["--ollama-model", ollama_model])
         
     print(f"[Supervisor] Launching Agent {agent_a_id} runner (Process A)...")
     proc_a = subprocess.Popen(cmd_a)
@@ -115,10 +124,19 @@ def main():
     parser.add_argument("--run-redundant", action="store_true", help="Launch two identical auth agents (collision check)")
     parser.add_argument("--deconflict", action="store_true", help="Enable goal deconfliction file parameter offsets")
     parser.add_argument("--interactive", action="store_true", help="Enable terminal prompts to manually negotiate collisions")
+    parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
+    parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
+    parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
     args = parser.parse_args()
     
     if args.run_redundant:
-        run_redundant_demo(interactive=args.interactive, deconflict=args.deconflict)
+        run_redundant_demo(
+            interactive=args.interactive, 
+            deconflict=args.deconflict,
+            llm_provider=args.llm_provider,
+            ollama_model=args.ollama_model,
+            step_delay=args.step_delay
+        )
     else:
         parser.print_help()
 

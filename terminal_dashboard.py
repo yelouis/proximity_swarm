@@ -97,7 +97,6 @@ def make_agents_table():
                     continue
                     
                 status = data.get("status", "exploring")
-                # Style states
                 if status == "exploring":
                     status_styled = Text(status.upper(), style="bold green")
                 elif status == "syncing":
@@ -111,13 +110,11 @@ def make_agents_table():
                 else:
                     status_styled = Text(status.upper())
                     
-                # Renders mini ASCII progress bar
                 prog = data.get("progress", 0)
                 filled = int(prog / 10)
                 bar = "█" * filled + "░" * (10 - filled)
                 progress_styled = f"{bar} {prog}%"
                 
-                # Format files
                 files = ", ".join(data.get("touched_files", []))
                 if len(files) > 30:
                     files = files[:27] + "..."
@@ -197,7 +194,6 @@ def make_logs_panel():
         try:
             with open(LOG_FILE, 'r') as f:
                 lines = f.readlines()
-                # Grab the last 8 lines
                 logs_lines = [line.strip() for line in lines[-8:]]
         except Exception:
             pass
@@ -227,6 +223,8 @@ def main():
     parser.add_argument("--deconflict", action="store_true", help="Enable goal deconfliction file parameter offsets")
     parser.add_argument("--interactive", action="store_true", help="Enable terminal prompts to manually negotiate collisions")
     parser.add_argument("--step-delay", type=float, default=2.0, help="Agent runner step delay in seconds")
+    parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
+    parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
     args = parser.parse_args()
     
     if not args.run_redundant:
@@ -258,6 +256,12 @@ def main():
         supervisor_cmd.append("--deconflict")
     if args.interactive:
         supervisor_cmd.append("--interactive")
+    if args.llm_provider:
+        supervisor_cmd.extend(["--llm-provider", args.llm_provider])
+    if args.ollama_model:
+        supervisor_cmd.extend(["--ollama-model", args.ollama_model])
+    if args.step_delay:
+        supervisor_cmd.extend(["--step-delay", str(args.step_delay)])
         
     print(f"[Dashboard] Initializing simulation: {' '.join(supervisor_cmd)}...")
     time.sleep(1.0)
@@ -269,7 +273,6 @@ def main():
     try:
         with Live(layout, refresh_per_second=5, screen=True) as live:
             while sup_proc.poll() is None:
-                # Update layout parts
                 layout["header"].update(make_header_panel())
                 layout["left"].update(make_agents_table())
                 layout["right_top"].update(make_collisions_panel())
@@ -277,7 +280,6 @@ def main():
                 layout["footer"].update(make_logs_panel())
                 time.sleep(0.2)
                 
-            # One final render cycle after exit
             layout["header"].update(make_header_panel())
             layout["left"].update(make_agents_table())
             layout["right_top"].update(make_collisions_panel())
@@ -287,11 +289,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        # Graceful cleanup
         sup_proc.terminate()
         sup_proc.wait()
         
-        # Restore terminal screen
         console.clear()
         print("\n" + "="*50)
         print("    Terminal Dashboard Session Terminated")

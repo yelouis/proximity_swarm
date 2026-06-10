@@ -63,18 +63,53 @@ def call_gemini_api(prompt):
             text = res_data["candidates"][0]["content"]["parts"][0]["text"]
             return json.loads(text.strip())
     except Exception as e:
-        # Fallback to None if API call fails or JSON parse fails
         print(f"[LLM ERROR] Gemini API call failed: {e}")
         return None
 
 
+def call_ollama_api(prompt, model="gemma4:latest"):
+    """Call local Ollama API using urllib to avoid library dependencies."""
+    url = "http://localhost:11434/api/generate"
+    headers = {"Content-Type": "application/json"}
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json"
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            text = res_data["response"]
+            return json.loads(text.strip())
+    except Exception as e:
+        print(f"[LLM ERROR] Ollama API call failed (Model: {model}): {e}")
+        return None
+
+
+def is_ollama_running():
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=1.0) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
 class AgentRunner:
-    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None):
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest"):
         self.agent_id = agent_id
         self.interactive = interactive
         self.step_delay = step_delay
         self.task_id = task_id
         self.offset_suffix = offset_suffix
+        self.llm_provider = llm_provider
+        self.ollama_model = ollama_model
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
         self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
@@ -141,7 +176,6 @@ class AgentRunner:
         """Query tombstones.json to check if any upcoming command/file matches a known dead-end."""
         tombstones = load_json(TOMBSTONES_FILE) or []
         for t in tombstones:
-            # Check if any touched file or executed tool matches the tombstone
             file_match = any(f in t.get("file_path", "") for f in files)
             tool_match = any(tool == t.get("tool_used", "") for tool in tools)
             if file_match and tool_match:
@@ -149,7 +183,6 @@ class AgentRunner:
         return None
 
     def execute_step(self):
-        # 1. Reload state to get potential background status changes
         self.state = load_json(self.state_file)
         
         if self.state["status"] == "dead":
@@ -198,7 +231,6 @@ class AgentRunner:
         print(f"\n[Agent {self.agent_id}] Executing Step {current_step['step_id']}/{len(steps)}: {current_step['name']}")
         print(f"  Description: {current_step['description']}")
         
-        # Check for Tombstone warning (with applied offset if present)
         step_files = self.apply_offset_to_files(current_step.get("touched_files", []))
         step_tools = current_step.get("tools", [])
         
@@ -241,20 +273,16 @@ class AgentRunner:
             save_json(TOMBSTONES_FILE, tombstones)
             print(f"  [TOMBSTONE REGISTERED] Saved failure context to tombstones.json.")
             
-            # Request termination
             self.state["status"] = "pending_termination"
             save_json(self.state_file, self.state)
             print(f"  Agent {self.agent_id} is pending termination approval from Supervisor.")
             return
             
-        # Wait step delay simulation
         time.sleep(self.step_delay)
         
-        # 3. Update agent state
         self.state["steps_completed"] += 1
         self.state["progress"] = int((self.state["steps_completed"] / len(steps)) * 100)
         
-        # Collect touched files and tools
         for f in step_files:
             if f not in self.state["touched_files"]:
                 self.state["touched_files"].append(f)
@@ -262,7 +290,6 @@ class AgentRunner:
             if t not in self.state["tools_used"]:
                 self.state["tools_used"].append(t)
                 
-        # Setup next step if available
         if self.state["steps_completed"] < len(steps):
             next_step = steps[self.state["steps_completed"]]
             self.state["current_step"] = {
@@ -279,7 +306,6 @@ class AgentRunner:
 
     def perform_negotiation(self):
         """Finds the active collision record and resolves it via LLM, Rules, or Interactive inputs."""
-        # Find collision file involving us
         collision_file = None
         collision_id = None
         for filename in os.listdir(COLLISIONS_DIR):
@@ -296,7 +322,6 @@ class AgentRunner:
             save_json(self.state_file, self.state)
             return
             
-        # Acquire negotiation lock / check if already resolved by the peer
         collision = load_json(collision_file)
         if not collision:
             return
@@ -306,7 +331,6 @@ class AgentRunner:
             self.state = load_json(self.state_file)
             return
             
-        # We perform the negotiation
         collision["status"] = "negotiating"
         save_json(collision_file, collision)
         
@@ -326,7 +350,6 @@ class AgentRunner:
         print(f"  Progress: {agent_b['progress']}% | Current: {agent_b['current_step']['name']}")
         print("-"*50)
         
-        resolution = {}
         action = None
         reason = ""
         
@@ -353,29 +376,44 @@ class AgentRunner:
                 else:
                     print("Invalid input. Select 1, 2, or 3.")
         else:
-            # Try Gemini API if key is available
-            api_key = os.environ.get("GEMINI_API_KEY")
-            if api_key:
-                print("Invoking Gemini LLM Negotiation engine...")
-                prompt = (
-                    f"You are the Swarm Supervisor coordinating two autonomous coding agents:\n"
-                    f"Agent A: ID={agent_a['id']}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
-                    f"Agent B: ID={agent_b['id']}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
-                    f"Evaluate if their goals are redundant (overlapping work on same file/subtask) or complementary.\n"
-                    f"If redundant, propose terminating the one with less progress. If complementary, keep both.\n"
-                    f"Respond strictly in JSON with keys 'action' (must be one of 'kill_a', 'kill_b', 'keep_both') and 'reason' (text explanation)."
-                )
-                res = call_gemini_api(prompt)
-                if res and "action" in res:
-                    action = res["action"]
-                    reason = res.get("reason", "LLM determined resolution.")
-                    print(f"Gemini Decision: {action.upper()}")
-                    print(f"Reason: {reason}")
+            # Determine LLM provider (Ollama or Gemini or rules)
+            provider = self.llm_provider
             
-            # Rule-based fallback if no API key or API call failed
+            # Auto-detect defaults if not explicitly set
+            if not provider:
+                if os.environ.get("GEMINI_API_KEY"):
+                    provider = "gemini"
+                elif is_ollama_running():
+                    provider = "ollama"
+                else:
+                    provider = "rules"
+            
+            prompt = (
+                f"You are the Swarm Supervisor coordinating two autonomous coding agents:\n"
+                f"Agent A: ID={agent_a['id']}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
+                f"Agent B: ID={agent_b['id']}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
+                f"Evaluate if their goals are redundant (overlapping work on same file/subtask) or complementary.\n"
+                f"If redundant, propose terminating the one with less progress. If complementary, keep both.\n"
+                f"Respond strictly in JSON with keys 'action' (must be one of 'kill_a', 'kill_b', 'keep_both') and 'reason' (text explanation)."
+            )
+            
+            res = None
+            if provider == "gemini":
+                print("Invoking Gemini LLM Negotiation engine...")
+                res = call_gemini_api(prompt)
+            elif provider == "ollama":
+                print(f"Invoking Ollama LLM Negotiation engine (Model: {self.ollama_model})...")
+                res = call_ollama_api(prompt, model=self.ollama_model)
+                
+            if res and "action" in res:
+                action = res["action"]
+                reason = res.get("reason", "LLM determined resolution.")
+                print(f"LLM ({provider.upper()}) Decision: {action.upper()}")
+                print(f"Reason: {reason}")
+            
+            # Rule-based fallback if rules were selected or API calls failed
             if not action:
                 print("Running local deterministic deconfliction rules...")
-                # Calculate simple overlap logic
                 is_redundant = collision["similarity_metrics"]["goal_cosine"] > 0.6
                 if is_redundant:
                     if agent_a["progress"] >= agent_b["progress"]:
@@ -388,7 +426,7 @@ class AgentRunner:
                     action = "keep_both"
                     reason = "Goals deemed complementary. Resuming both."
                     
-        # Apply resolution (setting to pending_termination instead of dead)
+        # Apply resolution
         if action == "kill_a":
             agent_a["status"] = "pending_termination"
             agent_b["status"] = "exploring"
@@ -420,7 +458,6 @@ class AgentRunner:
         print(f"Reason: {reason}")
         print("="*50 + "\n")
         
-        # Reload local state
         self.state = load_json(self.state_file)
 
     def share_knowledge_files(self, loser_id, survivor_id):
@@ -454,6 +491,8 @@ def main():
     parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
     parser.add_argument("--steps", type=int, default=10, help="Max number of execution steps to run")
     parser.add_argument("--offset-suffix", help="Filename offset suffix to apply during step execution")
+    parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
+    parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
     args = parser.parse_args()
     
     runner = AgentRunner(
@@ -461,7 +500,9 @@ def main():
         task_id=args.task_id, 
         interactive=args.interactive,
         step_delay=args.step_delay,
-        offset_suffix=args.offset_suffix
+        offset_suffix=args.offset_suffix,
+        llm_provider=args.llm_provider,
+        ollama_model=args.ollama_model
     )
     
     print(f"Starting Agent {args.agent_id} runner...")
