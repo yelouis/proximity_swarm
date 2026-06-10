@@ -2,7 +2,7 @@
 
 Proximity Swarm is an agentic framework designed to coordinate a swarm of autonomous agents working on complex tasks. It applies cellular-automata-style rules (inspired by Conway's Game of Life) and semantic spatial proximity to manage resource consumption, accelerate task execution, and share learnings dynamically.
 
-For a detailed breakdown of the concept, architecture, and roadmap, please see the [Brainstorming Document](brainstorming.md).
+For a detailed breakdown of the concept, architecture, and implementation details, please see the [Technical Design Document](design_doc.md).
 
 ## The Analogy: Git for LLM Trajectories
 

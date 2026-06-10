@@ -84,12 +84,36 @@ def call_ollama_api(prompt, model="gemma4:latest"):
             headers=headers,
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             text = res_data["response"]
             return json.loads(text.strip())
     except Exception as e:
         print(f"[LLM ERROR] Ollama API call failed (Model: {model}): {e}")
+        return None
+
+
+def call_ollama_raw(prompt, model="gemma4:latest"):
+    """Call local Ollama API using urllib to generate raw text responses."""
+    url = "http://localhost:11434/api/generate"
+    headers = {"Content-Type": "application/json"}
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            return res_data.get("response", "").strip()
+    except Exception as e:
+        print(f"[LLM ERROR] Raw Ollama call failed (Model: {model}): {e}")
         return None
 
 
@@ -246,12 +270,41 @@ class AgentRunner:
                 applied_workaround = True
                 print(f"  Action: Swapped compilation tool from 'gcc' to 'clang'.")
                 
+        # If final step and no files specified, use fallback answer.md to display output in dashboard
+        is_final_step = (self.state["steps_completed"] + 1) >= len(steps)
+        if not step_files and is_final_step:
+            step_files = ["answer.md"]
+
         # Simulate execution / Touch files in local sandbox workspace
         for filename in step_files:
             file_path = os.path.join(self.workspace_dir, filename)
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            content = f"# Agent {self.agent_id} completed {current_step['name']} at {time.time()}\n"
+            if self.llm_provider == "ollama" and is_ollama_running():
+                prompt = (
+                    f"You are Agent {self.agent_id} working on the task: '{self.state['goal']}'.\n"
+                    f"Current Step: {current_step['name']}\n"
+                    f"Description: {current_step['description']}\n"
+                    f"You are generating/updating the file: '{filename}'.\n\n"
+                    f"Generate the complete, high-quality, actual code or report content for this file. "
+                    f"Do not include any conversational dialogue, chat introduction, or explaining text outside the file content. "
+                    f"Output ONLY the raw content of the file."
+                )
+                res_content = call_ollama_raw(prompt, model=self.ollama_model)
+                if res_content:
+                    # Strip any markdown code fence wrappers if output by the LLM
+                    if res_content.startswith("```"):
+                        lines = res_content.splitlines()
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines and lines[-1].strip() == "```":
+                            lines = lines[:-1]
+                        res_content = "\n".join(lines)
+                    content = res_content
+            
             with open(file_path, 'w') as f:
-                f.write(f"# Agent {self.agent_id} completed {current_step['name']} at {time.time()}\n")
+                f.write(content)
             print(f"  Touched sandbox file: {filename}")
             
         # Check if the step is a trap and we failed to apply the workaround
@@ -301,6 +354,11 @@ class AgentRunner:
             self.state["status"] = "completed"
             self.state["current_step"] = None
             
+        # Check if supervisor updated our status during step execution (e.g. to syncing, pending_termination, or dead)
+        disk_state = load_json(self.state_file)
+        if disk_state and disk_state.get("status") in ["syncing", "pending_termination", "dead"]:
+            self.state["status"] = disk_state["status"]
+
         save_json(self.state_file, self.state)
         print(f"Step completed. Progress: {self.state['progress']}%")
 
