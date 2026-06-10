@@ -48,7 +48,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     running_processes = {}
     
     # Helper to launch an agent runner
-    def launch_agent(agent_id, task_id=None, offset_suffix=None):
+    def launch_agent(agent_id, task_id=None, offset_suffix=None, personality=None, goal=None):
         cmd = [
             sys.executable, "agent_runner.py",
             "--agent-id", agent_id,
@@ -65,6 +65,10 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             cmd.extend(["--llm-provider", llm_provider])
         if ollama_model:
             cmd.extend(["--ollama-model", ollama_model])
+        if personality:
+            cmd.extend(["--personality", personality])
+        if goal:
+            cmd.extend(["--goal", goal])
             
         print(f"[Supervisor] Launching Agent {agent_id} runner subprocess...")
         running_processes[agent_id] = subprocess.Popen(cmd)
@@ -73,8 +77,10 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     for idx, agent_info in enumerate(initial_agents):
         agent_id = agent_info["agent_id"]
         task_id = agent_info["task_id"]
-        offset = f"offset_{idx}" if deconflict else None
-        launch_agent(agent_id, task_id, offset)
+        personality = agent_info.get("personality")
+        goal = agent_info.get("goal")
+        offset = f"offset_{idx}" if (deconflict or len(initial_agents) > 1) else None
+        launch_agent(agent_id, task_id, offset, personality, goal)
 
     try:
         # Dynamic monitoring loop
@@ -164,6 +170,8 @@ def main():
     parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
     parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
+    parser.add_argument("--personalities", help="Comma-separated list of agent personalities/roles to initialize")
+    parser.add_argument("--agents-config", help="JSON string representing starting agent configurations")
     args = parser.parse_args()
     
     if args.run_redundant:
@@ -174,8 +182,34 @@ def main():
             ollama_model=args.ollama_model,
             step_delay=args.step_delay
         )
+    elif args.agents_config:
+        try:
+            initial_agents = json.loads(args.agents_config)
+        except Exception as e:
+            print(f"Error parsing --agents-config: {e}")
+            sys.exit(1)
+            
+        run_swarm(
+            initial_agents=initial_agents,
+            deconflict=args.deconflict,
+            interactive=args.interactive,
+            llm_provider=args.llm_provider,
+            ollama_model=args.ollama_model,
+            step_delay=args.step_delay
+        )
     elif args.task_id:
-        initial_agents = [{"agent_id": "001", "task_id": args.task_id}]
+        personalities = []
+        if args.personalities:
+            personalities = [p.strip() for p in args.personalities.split(",") if p.strip()]
+            
+        if personalities:
+            initial_agents = [
+                {"agent_id": f"{idx+1:03d}", "task_id": args.task_id, "personality": role}
+                for idx, role in enumerate(personalities)
+            ]
+        else:
+            initial_agents = [{"agent_id": "001", "task_id": args.task_id}]
+            
         run_swarm(
             initial_agents=initial_agents,
             deconflict=args.deconflict,

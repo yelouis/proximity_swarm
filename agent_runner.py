@@ -126,7 +126,7 @@ def is_ollama_running():
 
 
 class AgentRunner:
-    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest"):
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None):
         self.agent_id = agent_id
         self.interactive = interactive
         self.step_delay = step_delay
@@ -134,6 +134,8 @@ class AgentRunner:
         self.offset_suffix = offset_suffix
         self.llm_provider = llm_provider
         self.ollama_model = ollama_model
+        self.personality = personality or "Generalist"
+        self.custom_goal = goal
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
         self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
@@ -156,6 +158,15 @@ class AgentRunner:
     def load_or_init_state(self):
         state = load_json(self.state_file)
         if state:
+            needs_save = False
+            if "personality" not in state and self.personality:
+                state["personality"] = self.personality
+                needs_save = True
+            if "goal" not in state and self.custom_goal:
+                state["goal"] = self.custom_goal
+                needs_save = True
+            if needs_save:
+                save_json(self.state_file, state)
             return state
             
         # Initialize new agent state
@@ -175,7 +186,8 @@ class AgentRunner:
         state = {
             "id": self.agent_id,
             "parent_id": None,
-            "goal": task["goal"],
+            "goal": self.custom_goal or task["goal"],
+            "personality": self.personality,
             "status": "exploring",
             "current_step": {
                 "step_id": first_step["step_id"],
@@ -193,7 +205,7 @@ class AgentRunner:
             state["offset_suffix"] = self.offset_suffix
             
         save_json(self.state_file, state)
-        print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}' (Offset: {self.offset_suffix}).")
+        print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}' (Offset: {self.offset_suffix}) with role '{self.personality}' and goal '{state['goal']}'.")
         return state
 
     def check_tombstones(self, files, tools):
@@ -283,11 +295,12 @@ class AgentRunner:
             content = f"# Agent {self.agent_id} completed {current_step['name']} at {time.time()}\n"
             if self.llm_provider == "ollama" and is_ollama_running():
                 prompt = (
-                    f"You are Agent {self.agent_id} working on the task: '{self.state['goal']}'.\n"
+                    f"You are Agent {self.agent_id} with the role/personality: '{self.state.get('personality', 'Generalist')}' working on the task: '{self.state['goal']}'.\n"
                     f"Current Step: {current_step['name']}\n"
                     f"Description: {current_step['description']}\n"
                     f"You are generating/updating the file: '{filename}'.\n\n"
                     f"Generate the complete, high-quality, actual code or report content for this file. "
+                    f"You must perform your work in character based on your assigned role/personality. "
                     f"Do not include any conversational dialogue, chat introduction, or explaining text outside the file content. "
                     f"Output ONLY the raw content of the file."
                 )
@@ -448,8 +461,8 @@ class AgentRunner:
             
             prompt = (
                 f"You are the Swarm Supervisor coordinating two autonomous coding agents:\n"
-                f"Agent A: ID={agent_a['id']}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
-                f"Agent B: ID={agent_b['id']}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
+                f"Agent A: ID={agent_a['id']}, Role={agent_a.get('personality', 'Generalist')}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
+                f"Agent B: ID={agent_b['id']}, Role={agent_b.get('personality', 'Generalist')}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
                 f"Evaluate if their goals are redundant (overlapping work on same file/subtask) or complementary.\n"
                 f"If redundant, propose terminating the one with less progress. If complementary, keep both.\n"
                 f"Respond strictly in JSON with keys 'action' (must be one of 'kill_a', 'kill_b', 'keep_both') and 'reason' (text explanation)."
@@ -551,6 +564,8 @@ def main():
     parser.add_argument("--offset-suffix", help="Filename offset suffix to apply during step execution")
     parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
+    parser.add_argument("--personality", help="The personality/role assigned to this agent")
+    parser.add_argument("--goal", help="The dedicated goal/subtask assigned to this agent")
     args = parser.parse_args()
     
     runner = AgentRunner(
@@ -560,7 +575,9 @@ def main():
         step_delay=args.step_delay,
         offset_suffix=args.offset_suffix,
         llm_provider=args.llm_provider,
-        ollama_model=args.ollama_model
+        ollama_model=args.ollama_model,
+        personality=args.personality,
+        goal=args.goal
     )
     
     print(f"Starting Agent {args.agent_id} runner...")

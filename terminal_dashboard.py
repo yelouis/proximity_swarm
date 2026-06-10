@@ -32,6 +32,8 @@ LOG_FILE = os.path.join(STATE_DIR, "monitor.log")
 MOCK_TASKS_FILE = os.path.join(os.getcwd(), "mock_tasks.json")
 OLLAMA_MODEL = "gemma4:latest"
 
+predefined_personalities = []
+
 console = Console()
 
 
@@ -216,6 +218,7 @@ def make_agents_table():
     table.add_column("Progress", justify="center", width=12)
     table.add_column("Touched Files", justify="left", style="dim cyan")
     
+    has_agents = False
     if os.path.exists(AGENTS_DIR):
         filenames = sorted(os.listdir(AGENTS_DIR))
         for filename in filenames:
@@ -223,6 +226,7 @@ def make_agents_table():
                 data = load_json(os.path.join(AGENTS_DIR, filename))
                 if not data:
                     continue
+                has_agents = True
                     
                 status = data.get("status", "exploring")
                 if status == "exploring":
@@ -246,15 +250,38 @@ def make_agents_table():
                 files = ", ".join(data.get("touched_files", []))
                 if len(files) > 30:
                     files = files[:27] + "..."
+                
+                goal_prefix = f"[{data.get('personality', 'Generalist')}] "
+                full_goal = goal_prefix + data.get("goal", "")
+                if len(full_goal) > 60:
+                    full_goal = full_goal[:57] + "..."
                     
                 table.add_row(
                     data.get("id"),
                     str(data.get("parent_id") or "None"),
                     status_styled,
-                    data.get("goal")[:60] + ("..." if len(data.get("goal", "")) > 60 else ""),
+                    full_goal,
                     progress_styled,
                     files
                 )
+                
+    if not has_agents and predefined_personalities:
+        # Render the custom predefined roles configuration UI!
+        config_table = Table(title="Custom Swarm Configuration (Pending Query)", expand=True)
+        config_table.add_column("Agent #", justify="center", style="bold white", width=10)
+        config_table.add_column("Role / Personality", justify="left", style="cyan", width=25)
+        config_table.add_column("Dedicated Goal / Focus Area", justify="left", style="white")
+        config_table.add_column("Status", justify="center", style="green", width=20)
+        
+        for idx, entry in enumerate(predefined_personalities):
+            config_table.add_row(
+                f"Agent {idx+1:03d}",
+                entry.get("role", "Generalist"),
+                entry.get("goal") or "Inherits overall task goal",
+                "Ready to Initialize"
+            )
+        return Panel(config_table, border_style="yellow")
+
     return Panel(table, border_style="green")
 
 
@@ -491,6 +518,42 @@ def generate_task_steps(query):
     return None
 
 
+def recommend_starting_agents(query):
+    """Query Ollama to recommend optimal starting agent roles and goals for the query."""
+    prompt = (
+        f"You are the Swarm Architect. Analyze the following task request:\n"
+        f"Task: '{query}'\n\n"
+        f"Recommend the optimal number of starting agents (minimum 1, maximum 3) to execute this task.\n"
+        f"For each agent, provide:\n"
+        f"- 'role': A concise role or personality (e.g. 'Software Engineer', 'Pytest QA Specialist', 'Documentation Lead')\n"
+        f"- 'goal': A specific, dedicated goal/focus area for this agent (e.g. 'Write core JWT signing library in python', 'Write integration tests to validate token algorithms')\n\n"
+        f"You MUST respond with a valid JSON object only. Do not include markdown code fences or explanations outside the JSON.\n"
+        f"Example output structure:\n"
+        f"{{\n"
+        f"  \"recommendations\": [\n"
+        f"    {{\n"
+        f"      \"role\": \"Software Engineer\",\n"
+        f"      \"goal\": \"Write core JWT library\"\n"
+        f"    }}\n"
+        f"  ]\n"
+        f"}}\n"
+    )
+    
+    response_text = call_ollama(prompt)
+    if not response_text:
+        return []
+        
+    try:
+        cleaned_json = extract_json(response_text)
+        data = json.loads(cleaned_json)
+        if "recommendations" in data:
+            return data["recommendations"]
+    except Exception:
+        pass
+        
+    return []
+
+
 def register_dynamic_task(task_id, goal, steps):
     if not os.path.exists(MOCK_TASKS_FILE):
         tasks_data = {"tasks": {}}
@@ -635,42 +698,124 @@ def main():
                 time.sleep(1.5)
                 continue
                 
+            if cmd in ["/add-agent", "/add-personality"]:
+                if not arg:
+                    print("\n\033[1;31m[-] Error: Usage: /add-agent <role> : <goal> (goal is optional)\033[0m")
+                    time.sleep(2.0)
+                    continue
+                
+                if ":" in arg:
+                    r_part, g_part = arg.split(":", 1)
+                    role = r_part.strip()
+                    goal = g_part.strip()
+                else:
+                    role = arg.strip()
+                    goal = None
+                
+                if role:
+                    predefined_personalities.append({"role": role, "goal": goal})
+                    print(f"\n\033[1;32m[+] Registered agent: '{role}'\033[0m")
+                    if goal:
+                        print(f"    Dedicated Goal: '{goal}'")
+                else:
+                    print("\n\033[1;31m[-] Error: Role name cannot be empty.\033[0m")
+                time.sleep(1.5)
+                continue
+
             if cmd == "/help":
                 print("\n\033[1;33mAvailable Dashboard CLI Commands:\033[0m")
-                print("  /help              - Show this help dialogue")
-                print("  /clean [target]    - Clean specific storage/files rather than everything.")
-                print("                       Supported targets: 'logs', 'workspaces', 'collisions',")
-                print("                       'tombstones', 'tasks', 'all', or a specific filename")
-                print("                       (e.g., '/clean quicksort.py' or '/clean agent_001/src/quicksort.py')")
-                print("  /delete-artifacts  - Synonym for /clean")
-                print("  /exit              - Exit the TUI Dashboard\n")
+                print("  /help                     - Show this help dialogue")
+                print("  /add-agent <role> : <goal> - Predefine custom agent role and dedicated goal")
+                print("                              (e.g., '/add-agent Tester : Write tests')")
+                print("  /clean [target]           - Clean specific storage/files rather than everything.")
+                print("                              Supported targets: 'logs', 'workspaces', 'collisions',")
+                print("                              'tombstones', 'tasks', 'all', or a specific filename")
+                print("  /delete-artifacts         - Synonym for /clean")
+                print("  /exit                     - Exit the TUI Dashboard\n")
                 print("Press Enter to return to dashboard...")
                 input()
                 continue
+
+            # Check if personalities should be recommended
+            if not predefined_personalities:
+                recs = recommend_starting_agents(user_input)
+                if recs:
+                    print("\n\033[1;33m[Swarm Recommendation Engine]\033[0m")
+                    print(f"No custom agents defined. Based on your task: '{user_input}', I recommend starting with {len(recs)} agents:")
+                    for i, r in enumerate(recs):
+                        print(f"  {i+1}. Role: {r.get('role')} | Goal: {r.get('goal')}")
+                    print("\nInitialize the swarm with these recommended agents? (Y/n) > ", end="")
+                    ans = input().strip().lower()
+                    if not ans or ans in ["y", "yes"]:
+                        predefined_personalities.extend(recs)
+                        print("\033[1;32m[+] Initialized swarm with recommended agents.\033[0m")
+                        time.sleep(1.5)
+                    else:
+                        print("[*] Initializing default single-agent swarm.")
+                        time.sleep(1.0)
+                        
+            # Decompose goals and register tasks
+            agents_config = []
+            now_ts = int(time.time())
+            
+            if predefined_personalities:
+                for idx, entry in enumerate(predefined_personalities):
+                    agent_role = entry.get("role", "Generalist")
+                    agent_goal = entry.get("goal") or user_input
+                    agent_id = f"{idx+1:03d}"
+                    
+                    print(f"\n[*] Decomposing goal for Agent {agent_id} ({agent_role})...")
+                    steps = generate_task_steps(agent_goal)
+                    if not steps:
+                        steps = [
+                            {
+                                "step_id": 1,
+                                "name": "General Execution",
+                                "description": f"Perform tasks for: {agent_goal}",
+                                "touched_files": [f"src/agent_{agent_id}_output.md"],
+                                "tools": ["edit_file"]
+                            }
+                        ]
+                    
+                    task_id = f"task_dynamic_{now_ts}_{idx}"
+                    register_dynamic_task(task_id, agent_goal, steps)
+                    
+                    agents_config.append({
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "personality": agent_role,
+                        "goal": agent_goal
+                    })
+            else:
+                agent_goal = user_input
+                print("\n[*] Decomposing task using Ollama...")
+                steps = generate_task_steps(agent_goal)
+                if not steps:
+                    steps = [
+                        {
+                            "step_id": 1,
+                            "name": "General Execution",
+                            "description": f"Perform research and coordinate: {agent_goal}",
+                            "touched_files": ["src/dynamic_task_output.md"],
+                            "tools": ["edit_file"]
+                        }
+                    ]
+                task_id = f"task_dynamic_{now_ts}_0"
+                register_dynamic_task(task_id, agent_goal, steps)
+                agents_config.append({
+                    "agent_id": "001",
+                    "task_id": task_id,
+                    "personality": "Generalist",
+                    "goal": agent_goal
+                })
                 
-            task_id = f"task_dynamic_{int(time.time())}"
+            # Clear predefined personalities for next run
+            predefined_personalities.clear()
             
-            # 3. Dynamic decomposition
-            print("\n[*] Analyzing and decomposing task using Ollama...")
-            steps = generate_task_steps(user_input)
-            if not steps:
-                print("[-] Failed to decompose task. Using fallback steps...")
-                steps = [
-                    {
-                        "step_id": 1,
-                        "name": "General Execution",
-                        "description": f"Perform research and coordinate: {user_input}",
-                        "touched_files": ["src/dynamic_task_output.md"],
-                        "tools": ["edit_file"]
-                    }
-                ]
-            
-            register_dynamic_task(task_id, user_input, steps)
-            
-            # 4. Launch dynamic execution loop in dashboard
+            # Launch dynamic execution loop in dashboard
             supervisor_cmd = [
                 sys.executable, "supervisor.py",
-                "--task-id", task_id,
+                "--agents-config", json.dumps(agents_config),
                 "--llm-provider", "ollama",
                 "--step-delay", "1.5"
             ]

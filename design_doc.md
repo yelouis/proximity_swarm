@@ -118,7 +118,18 @@ To manage storage overhead and clear out dynamic artifacts, the TUI REPL impleme
 
 ---
 
-## 4. Deconfliction & Collision Negotiation
+## 4. Pre-Query Agent Swarm Configuration & Recommendations
+
+Users can define custom roles and dedicated goals for starting agents in the swarm before submitting queries. If none are specified, the system recommends optimal roles and goals based on the query:
+
+- **Manual Configuration**: Users type `/add-agent <role> : <goal>` to register custom agents. The goals determine what focus areas each agent has and shape the dynamic step decomposition for their specific task.
+- **Dynamic Recommendation**: Upon receiving a query, if the list of predefined agents is empty, the TUI uses the local Ollama instance to analyze the query. It recommends the optimal number of starting agents (1-3), specific specialist roles, and dedicated goals.
+- **TUI Prompts**: The user is prompted to accept or reject the recommended swarm layout before initialization.
+- **Supervisor Routing**: Predefined agent configurations (IDs, tasks, roles, goals) are serialized into a JSON string and passed to `supervisor.py` via the `--agents-config` CLI argument.
+
+---
+
+## 5. Deconfliction & Collision Negotiation
 
 When the Proximity Engine detects that two agents are drifting too close, they are paused, and a negotiation workflow begins:
 
@@ -128,7 +139,7 @@ When the Proximity Engine detects that two agents are drifting too close, they a
 
 ---
 
-## 5. Verification Plan & Automated Tests
+## 6. Verification Plan & Automated Tests
 
 A dedicated test suite is built under `/tests` to verify both supervisor logic, mathematical distance calculations, and the TUI storage cleanups:
 
@@ -136,3 +147,4 @@ A dedicated test suite is built under `/tests` to verify both supervisor logic, 
 - **`tests/test_monitor.py`**: Validates agent spawning, state loading, and workspace provisioning.
 - **`tests/test_v2.py`**: Validates consensus-gate approvals/rejections, cascading process terminations, and deconfliction offsets.
 - **`tests/test_clean.py`**: Validates granular command inputs and recursive workspace file deletions.
+- **`tests/test_personalities.py`**: Validates custom agent role/goal command registration and persistence in the runner.
