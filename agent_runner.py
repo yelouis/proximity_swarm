@@ -7,6 +7,13 @@ import urllib.request
 import urllib.error
 import argparse
 
+# Try to import web_search (for local search tool access)
+try:
+    import web_search
+except ImportError:
+    web_search = None
+
+
 STATE_DIR = os.path.join(os.getcwd(), ".proximity_swarm")
 AGENTS_DIR = os.path.join(STATE_DIR, "agents")
 COLLISIONS_DIR = os.path.join(STATE_DIR, "collisions")
@@ -115,6 +122,123 @@ def call_ollama_raw(prompt, model="gemma4:latest"):
     except Exception as e:
         print(f"[LLM ERROR] Raw Ollama call failed (Model: {model}): {e}")
         return None
+
+# Ollama Search Tool schema representation
+SEARCH_WEB_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_web",
+        "description": "Searches the web for up-to-date information about a given query.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to run."
+                }
+            },
+            "required": ["query"]
+        }
+    }
+}
+
+# Simple registry mapping tool names to actual execution functions
+TOOL_REGISTRY = {}
+if web_search:
+    TOOL_REGISTRY["search_web"] = lambda query: json.dumps(web_search.search_web(query))
+else:
+    # Fallback mock search if module import failed
+    TOOL_REGISTRY["search_web"] = lambda query: json.dumps([
+        {"title": f"Fallback Mock for query: {query}", "url": "", "snippet": "Search module unavailable."}
+    ])
+
+
+def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest"):
+    """
+    Call Ollama Chat API with tool-use capability.
+    Executes tools locally if requested by the LLM, and submits results back
+    to continue the conversation.
+    """
+    url = "http://localhost:11434/api/chat"
+    headers = {"Content-Type": "application/json"}
+    
+    current_messages = list(messages)
+    
+    for iteration in range(5):
+        body = {
+            "model": model,
+            "messages": current_messages,
+            "stream": False
+        }
+        if tools:
+            body["tools"] = tools
+            
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                
+            assistant_msg = res_data.get("message", {})
+            tool_calls = assistant_msg.get("tool_calls", [])
+            
+            # If the model requested tool calls, we must execute them
+            if tool_calls:
+                # Add the assistant's message with tool call requests to history
+                current_messages.append(assistant_msg)
+                
+                # Execute each tool call
+                for tc in tool_calls:
+                    func_info = tc.get("function", {})
+                    func_name = func_info.get("name")
+                    func_args = func_info.get("arguments", {})
+                    
+                    print(f"  [Tool Call] Model requested: {func_name} with args: {func_args}")
+                    
+                    # Execute tool
+                    if func_name in TOOL_REGISTRY:
+                        try:
+                            # Extract search query
+                            query = func_args.get("query")
+                            if not query:
+                                # Sometimes models output a string argument or named parameter differently
+                                if isinstance(func_args, str):
+                                    query = func_args
+                                else:
+                                    query = str(list(func_args.values())[0]) if func_args else ""
+                            
+                            result = TOOL_REGISTRY[func_name](query)
+                        except Exception as ex:
+                            result = json.dumps({"error": f"Tool execution failed: {ex}"})
+                    else:
+                        result = json.dumps({"error": f"Tool '{func_name}' is not registered."})
+                    
+                    # Append tool result message
+                    current_messages.append({
+                        "role": "tool",
+                        "content": result,
+                        "name": func_name
+                    })
+                
+                # Continue loop to send tool results back to Ollama
+                continue
+            else:
+                # No tool calls; return final text response content
+                return assistant_msg.get("content", "").strip()
+                
+        except Exception as e:
+            print(f"[LLM ERROR] Ollama Chat API call failed: {e}")
+            raise e
+            
+    print("[LLM WARNING] Reached maximum tool call iterations.")
+    for msg in reversed(current_messages):
+        if msg.get("role") == "assistant" and msg.get("content"):
+            return msg["content"].strip()
+    return None
 
 
 def is_ollama_running():
@@ -446,7 +570,44 @@ class AgentRunner:
                     f"Do not include any conversational dialogue, chat introduction, or explaining text outside the file content. "
                     f"Output ONLY the raw content of the file."
                 )
-                res_content = call_ollama_raw(prompt, model=self.ollama_model)
+                
+                res_content = None
+                try:
+                    # Attempt native Ollama tool-calling loop
+                    system_prompt = (
+                        f"You are Agent {self.agent_id} with the role/personality: '{self.state.get('personality', 'Generalist')}' working on the task: '{self.state['goal']}'.\n"
+                        f"You must perform your work in character based on your assigned role/personality. "
+                        f"Do not include any conversational dialogue, chat introduction, or explaining text outside the file content. "
+                        f"Output ONLY the raw content of the file. No markdown code fence wrapper or conversational noise."
+                    )
+                    user_prompt = ""
+                    if getattr(self, "historical_context", None):
+                        user_prompt += self.historical_context + "\n\n"
+                    user_prompt += (
+                        f"Current Step: {current_step['name']}\n"
+                        f"Description: {current_step['description']}\n"
+                        f"You are generating/updating the file: '{filename}'.\n\n"
+                        f"Generate the complete, high-quality, actual code or report content for this file."
+                    )
+                    
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                    print(f"  [Tool Use Check] Querying Ollama with search tool capability...")
+                    res_content = call_ollama_chat_with_tools(
+                        messages=messages,
+                        tools=[SEARCH_WEB_TOOL],
+                        model=self.ollama_model
+                    )
+                except Exception as tool_ex:
+                    print(f"  [Tool Use Bypass] Ollama tool-calling failed/unsupported: {tool_ex}. Falling back to raw generate.")
+                    res_content = None
+                
+                # If tool calling failed, returned empty, or was bypassed, fall back to generate endpoint
+                if not res_content:
+                    res_content = call_ollama_raw(prompt, model=self.ollama_model)
+                
                 if res_content:
                     # Strip any markdown code fence wrappers if output by the LLM
                     if res_content.startswith("```"):
