@@ -6,6 +6,7 @@ import time
 import math
 import string
 import logging
+import urllib.request
 
 # Define state directory
 STATE_DIR = os.path.join(os.getcwd(), ".proximity_swarm")
@@ -103,13 +104,97 @@ def calculate_jaccard_similarity(set1, set2):
     return len(s1.intersection(s2)) / len(union)
 
 
+OLLAMA_MODEL = "gemma4:latest"
+
+PHASE_WEIGHTS = {
+    "Planning": (0.8, 0.1, 0.1),
+    "Coding": (0.4, 0.4, 0.2),
+    "Debugging": (0.1, 0.6, 0.3),
+    "Documentation": (0.6, 0.3, 0.1)
+}
+
+
+def is_ollama_running():
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=1.0) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def fallback_classify_phase(step_name, step_description):
+    text = (step_name + " " + step_description).lower()
+    if any(k in text for k in ["bug", "fix", "debug", "error", "fail", "issue", "crash", "compile", "test", "resolve"]):
+        return "Debugging"
+    if any(k in text for k in ["doc", "read", "writeup", "report", "comment", "markdown", "synthesize", "explain"]):
+        return "Documentation"
+    if any(k in text for k in ["init", "plan", "setup", "initialize", "design", "requirements", "prepare", "analysis", "architect"]):
+        return "Planning"
+    return "Coding"
+
+
+def classify_phase(agent):
+    current_step = agent.get("current_step")
+    if not current_step:
+        return "Planning"
+        
+    if "phase" in current_step:
+        return current_step["phase"]
+        
+    step_name = current_step.get("name", "")
+    step_description = current_step.get("description", "")
+    
+    phase = None
+    if is_ollama_running():
+        url = "http://localhost:11434/api/generate"
+        headers = {"Content-Type": "application/json"}
+        prompt = (
+            f"Classify the following agent task step into exactly one of these four phases: "
+            f"Planning, Coding, Debugging, Documentation.\n"
+            f"Step Name: {step_name}\n"
+            f"Step Description: {step_description}\n\n"
+            f"Respond with a JSON object containing a single key 'phase' whose value is exactly one of the four strings: "
+            f"'Planning', 'Coding', 'Debugging', 'Documentation'."
+        )
+        body = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json"
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                resp_text = res_data.get("response", "").strip()
+                parsed = json.loads(resp_text)
+                phase_candidate = parsed.get("phase", "").strip()
+                if phase_candidate in PHASE_WEIGHTS:
+                    phase = phase_candidate
+        except Exception:
+            pass
+            
+    if not phase:
+        phase = fallback_classify_phase(step_name, step_description)
+        
+    current_step["phase"] = phase
+    if "id" in agent:
+        save_agent_state(agent)
+    return phase
+
+
 def calculate_proximity(agent1, agent2, corpus):
     """
     Computes composite distance metric between two agents.
     Returns (distance, cosine_sim, file_jaccard, tool_jaccard)
     """
-    goal1 = agent1.get("goal", "") + " " + agent1.get("current_step", {}).get("description", "")
-    goal2 = agent2.get("goal", "") + " " + agent2.get("current_step", {}).get("description", "")
+    goal1 = agent1.get("goal", "") + " " + agent1.get("current_step", {}).get("description", "") if agent1.get("current_step") else agent1.get("goal", "")
+    goal2 = agent2.get("goal", "") + " " + agent2.get("current_step", {}).get("description", "") if agent2.get("current_step") else agent2.get("goal", "")
     cosine_sim = calculate_tfidf_cosine_similarity(goal1, goal2, corpus)
     
     files1 = agent1.get("touched_files", [])
@@ -124,7 +209,17 @@ def calculate_proximity(agent1, agent2, corpus):
     d_workspace = 1.0 - file_jaccard
     d_tools = 1.0 - tool_jaccard
     
-    w1, w2, w3 = 0.5, 0.3, 0.2
+    # Dynamic weighting based on phase classification
+    phase1 = classify_phase(agent1)
+    phase2 = classify_phase(agent2)
+    
+    w1_1, w2_1, w3_1 = PHASE_WEIGHTS.get(phase1, (0.5, 0.3, 0.2))
+    w1_2, w2_2, w3_2 = PHASE_WEIGHTS.get(phase2, (0.5, 0.3, 0.2))
+    
+    w1 = (w1_1 + w1_2) / 2.0
+    w2 = (w2_1 + w2_2) / 2.0
+    w3 = (w3_1 + w3_2) / 2.0
+    
     distance = w1 * d_goal + w2 * d_workspace + w3 * d_tools
     
     return distance, cosine_sim, file_jaccard, tool_jaccard
@@ -429,7 +524,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Proximity Swarm - V2 Supervisor Monitor")
     parser.add_argument("--interval", type=float, default=1.5, help="Polling interval in seconds")
     parser.add_argument("--threshold", type=float, default=0.5, help="Collision distance threshold (lower = closer)")
+    parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model to use for phase classification")
     args = parser.parse_args()
+    
+    OLLAMA_MODEL = args.ollama_model
     
     try:
         monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold)

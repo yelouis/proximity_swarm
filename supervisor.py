@@ -145,6 +145,8 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     # 1. Start the background Supervisor Monitor process
     print("[Supervisor] Launching Supervisor Monitor daemon...")
     monitor_cmd = [sys.executable, "proximity_monitor.py", "--interval", "0.5"]
+    if ollama_model:
+        monitor_cmd.extend(["--ollama-model", ollama_model])
     monitor_proc = subprocess.Popen(
         monitor_cmd, 
         stdout=subprocess.DEVNULL, 
