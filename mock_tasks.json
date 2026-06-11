@@ -159,6 +159,96 @@
           ]
         }
       ]
+    },
+    "task_dynamic_1781151538_0": {
+      "id": "task_dynamic_1781151538_0",
+      "goal": "Identify 3-5 distinct and viable agent swarm concepts from GitHub with high stars or recent activity.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Search GitHub for Swarm Concepts",
+          "description": "Use targeted searches on GitHub (e.g., 'agent swarm github', 'collective intelligence framework') to identify initial candidate repositories. Focus on filtering results by high star count or recent commit activity to ensure viability and interest.",
+          "touched_files": [
+            "scratchpad/github_search_keywords.txt"
+          ],
+          "tools": [
+            "browser_search"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Curate & Filter Viable Candidates",
+          "description": "Analyze the list of candidates gathered in Step 1. For each promising repository, visit its main page and README to understand its concept (e.g., task decomposition, communication protocol). Select 3-5 distinct concepts that appear viable for implementation or study.",
+          "touched_files": [
+            "scratchpad/candidate_summary.md"
+          ],
+          "tools": [
+            "browser_search",
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Final Report Compilation",
+          "description": "Consolidate the findings into a final report format. For each of the 3-5 selected concepts, document its name, primary function (the 'swarm' mechanism), key features/dependencies, and a brief explanation of why it is considered viable or distinct.",
+          "touched_files": [
+            "output.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ]
+    },
+    "task_dynamic_1781151538_1": {
+      "id": "task_dynamic_1781151538_1",
+      "goal": "Analyze the selected concepts for technical feasibility, required technology stack (e.g., Python, Javascript), and novelty level.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Assess Technical Feasibility",
+          "description": "Conduct a thorough review of the selected concepts against current technological capabilities. This involves identifying potential bottlenecks, necessary hardware/software prerequisites (beyond just programming language), and assessing overall implementation complexity to determine if the concepts are technically viable with reasonable effort.",
+          "touched_files": [
+            "analysis/feasibility_report.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Determine Technology Stack Requirements",
+          "description": "Based on the feasibility assessment, map out the precise technology stack needed. For each concept, specify required languages (Python, JS, etc.), key frameworks/libraries (e.g., React, Django, TensorFlow), and external services or APIs. Organize this into a detailed technical requirement matrix.",
+          "touched_files": [
+            "analysis/technology_stack_report.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Evaluate Novelty and Market Gap",
+          "description": "Research the novelty level of the concepts by analyzing existing solutions or academic literature. The goal is to quantify how unique each concept is (low, medium, high) and identify potential market gaps that can be filled with a novel approach.",
+          "touched_files": [
+            "analysis/novelty_assessment.md"
+          ],
+          "tools": [
+            "run_search"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Synthesize Final Analysis Report",
+          "description": "Compile the findings from all previous steps (feasibility, tech stack, novelty) into a single, cohesive final report. This 'Analysis & Strategy Document' must summarize all key takeaways, providing a definitive verdict on the strategic viability of the entire set of concepts.",
+          "touched_files": [
+            "output/analysis_strategy_report.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ]
     }
   }
 }

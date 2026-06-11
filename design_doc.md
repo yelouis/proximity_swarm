@@ -124,7 +124,8 @@ Users can define custom roles and dedicated goals for starting agents in the swa
 
 - **Manual Configuration**: Users type `/add-agent <role> : <goal>` to register custom agents. The goals determine what focus areas each agent has and shape the dynamic step decomposition for their specific task.
 - **Dynamic Recommendation**: Upon receiving a query, if the list of predefined agents is empty, the TUI uses the local Ollama instance to analyze the query. It recommends the optimal number of starting agents (1-3), specific specialist roles, and dedicated goals.
-- **TUI Prompts**: The user is prompted to accept or reject the recommended swarm layout before initialization.
+- **TUI Swarm Designer**: Before launching a task, the TUI opens a dedicated CLI Swarm Designer editor to review, edit (change roles/goals), add, or remove agents. It handles unread input streams robustly.
+- **Logging Redirects**: To prevent terminal screen shifting/breakage, all task analysis, decomposition logs, and supervisor setup details bypass standard output and are written directly to `monitor.log`, displaying cleanly inside the bottom console log panel.
 - **Supervisor Routing**: Predefined agent configurations (IDs, tasks, roles, goals) are serialized into a JSON string and passed to `supervisor.py` via the `--agents-config` CLI argument.
 
 ---

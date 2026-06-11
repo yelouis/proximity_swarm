@@ -4,6 +4,7 @@ import json
 import tempfile
 import shutil
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -110,6 +111,30 @@ class TestSwarmPersonalities(unittest.TestCase):
         self.assertEqual(terminal_dashboard.predefined_personalities[0]["goal"], "Perform static analysis")
         self.assertEqual(terminal_dashboard.predefined_personalities[1]["role"], "Developer")
         self.assertIsNone(terminal_dashboard.predefined_personalities[1]["goal"])
+
+    @unittest.mock.patch('builtins.input')
+    def test_run_swarm_designer(self, mock_input):
+        initial = [{"role": "Tester", "goal": "Write tests"}]
+        
+        mock_input.side_effect = [
+            "/edit 1 role=QA Expert",
+            "/edit 1 goal=Verify code coverage",
+            "/add Assistant : Help writing docs",
+            "/remove 2",
+            "/run"
+        ]
+        
+        final_list = terminal_dashboard.run_swarm_designer(initial, "Test task")
+        
+        self.assertIsNotNone(final_list)
+        self.assertEqual(len(final_list), 1)
+        self.assertEqual(final_list[0]["role"], "QA Expert")
+        self.assertEqual(final_list[0]["goal"], "Verify code coverage")
+        
+        # Cancel swarm designer
+        mock_input.side_effect = ["/cancel"]
+        final_list = terminal_dashboard.run_swarm_designer(initial, "Test task")
+        self.assertIsNone(final_list)
 
 
 if __name__ == "__main__":

@@ -604,6 +604,148 @@ def execute_dashboard_run(layout, supervisor_cmd):
         sup_proc.wait()
 
 
+def write_to_monitor_log(message, level="INFO"):
+    """Writes a message directly to monitor.log in the standard format."""
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]  # YYYY-MM-DD HH:MM:SS,mmm
+        with open(LOG_FILE, 'a') as f:
+            f.write(f"{time_str} [{level}] {message}\n")
+    except Exception:
+        pass
+
+
+def run_swarm_designer(initial_list, overall_query):
+    """Enters an interactive loop to let the user review, add, edit, or remove swarm agents."""
+    current_agents = list(initial_list)
+    
+    while True:
+        os.system("clear")
+        print("\n\033[1;33m" + "="*70)
+        print("                🛰️  SWARM DESIGNER MODE  🛰️")
+        print("="*70 + "\033[0m\n")
+        print(f"\033[1mOverall Goal/Query:\033[0m {overall_query}\n")
+        
+        if not current_agents:
+            print("  (No agents defined yet. The swarm will be empty! Add agents or cancel.)\n")
+        else:
+            for idx, agent in enumerate(current_agents):
+                role = agent.get("role", "Generalist")
+                goal = agent.get("goal") or "Inherits overall task goal"
+                print(f"  \033[1;36mAgent {idx+1:02d}:\033[0m")
+                print(f"    \033[1mRole/Personality:\033[0m {role}")
+                print(f"    \033[1mDedicated Goal:\033[0m   {goal}\n")
+                
+        print("\033[1;33mAvailable Commands:\033[0m")
+        print("  \033[1m/run\033[0m                       - Start the swarm with these agents")
+        print("  \033[1m/edit <num> role=<val>\033[0m     - Change an agent's role/personality")
+        print("  \033[1m/edit <num> goal=<val>\033[0m     - Change an agent's dedicated goal")
+        print("  \033[1m/add <role> : <goal>\033[0m       - Add a new agent to the swarm")
+        print("  \033[1m/remove <num>\033[0m              - Remove an agent from the swarm")
+        print("  \033[1m/cancel\033[0m                    - Abort task and go back to main dashboard\n")
+        
+        # Flush stdin before prompting to prevent skipped input
+        try:
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
+            
+        designer_prompt = "\033[1;32mSwarm Designer > \033[0m"
+        try:
+            cmd_input = input(designer_prompt).strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n[*] Swarm design cancelled.")
+            return None
+            
+        if not cmd_input:
+            continue
+            
+        parts = cmd_input.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else None
+        
+        if cmd == "/run":
+            if not current_agents:
+                print("[-] Error: Cannot start an empty swarm. Please add agents first.")
+                time.sleep(1.5)
+                continue
+            return current_agents
+            
+        elif cmd == "/cancel":
+            return None
+            
+        elif cmd == "/add":
+            if not arg:
+                print("[-] Error: Usage: /add <role> : <goal>")
+                time.sleep(1.5)
+                continue
+            if ":" in arg:
+                r_part, g_part = arg.split(":", 1)
+                r = r_part.strip()
+                g = g_part.strip()
+            else:
+                r = arg.strip()
+                g = None
+            if r:
+                current_agents.append({"role": r, "goal": g})
+                print(f"[+] Added agent: {r}")
+            else:
+                print("[-] Error: Agent role cannot be empty.")
+            time.sleep(1.0)
+            
+        elif cmd == "/remove":
+            if not arg or not arg.isdigit():
+                print("[-] Error: Usage: /remove <num>")
+                time.sleep(1.5)
+                continue
+            num = int(arg) - 1
+            if 0 <= num < len(current_agents):
+                removed = current_agents.pop(num)
+                print(f"[+] Removed agent {num+1}: {removed['role']}")
+            else:
+                print("[-] Error: Invalid agent number.")
+            time.sleep(1.0)
+            
+        elif cmd == "/edit":
+            if not arg:
+                print("[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>")
+                time.sleep(2.0)
+                continue
+            
+            subparts = arg.split(maxsplit=1)
+            if len(subparts) < 2 or not subparts[0].isdigit():
+                print("[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>")
+                time.sleep(2.0)
+                continue
+                
+            num = int(subparts[0]) - 1
+            edit_arg = subparts[1]
+            
+            if 0 <= num < len(current_agents):
+                if "=" in edit_arg:
+                    field, val = edit_arg.split("=", 1)
+                    field = field.strip().lower()
+                    val = val.strip()
+                    if field == "role":
+                        current_agents[num]["role"] = val
+                        print(f"[+] Updated Agent {num+1}'s role to: {val}")
+                    elif field == "goal":
+                        current_agents[num]["goal"] = val
+                        print(f"[+] Updated Agent {num+1}'s goal to: {val}")
+                    else:
+                        print("[-] Error: Field must be 'role' or 'goal'.")
+                else:
+                    print("[-] Error: Format must be field=value.")
+            else:
+                print("[-] Error: Invalid agent number.")
+            time.sleep(1.5)
+            
+        else:
+            print("[-] Unknown designer command.")
+            time.sleep(1.0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Proximity Swarm V2 - Terminal Monitor Dashboard")
     parser.add_argument("--run-redundant", action="store_true", help="Launch the identical goal collision demo")
@@ -737,80 +879,60 @@ def main():
                 continue
 
             # Check if personalities should be recommended
-            if not predefined_personalities:
+            initial_swarm = []
+            if predefined_personalities:
+                initial_swarm = list(predefined_personalities)
+            else:
+                write_to_monitor_log(f"No custom agents defined. Querying Ollama for recommendations on task: '{user_input}'...", "INFO")
                 recs = recommend_starting_agents(user_input)
                 if recs:
-                    print("\n\033[1;33m[Swarm Recommendation Engine]\033[0m")
-                    print(f"No custom agents defined. Based on your task: '{user_input}', I recommend starting with {len(recs)} agents:")
-                    for i, r in enumerate(recs):
-                        print(f"  {i+1}. Role: {r.get('role')} | Goal: {r.get('goal')}")
-                    print("\nInitialize the swarm with these recommended agents? (Y/n) > ", end="")
-                    ans = input().strip().lower()
-                    if not ans or ans in ["y", "yes"]:
-                        predefined_personalities.extend(recs)
-                        print("\033[1;32m[+] Initialized swarm with recommended agents.\033[0m")
-                        time.sleep(1.5)
-                    else:
-                        print("[*] Initializing default single-agent swarm.")
-                        time.sleep(1.0)
-                        
+                    initial_swarm = recs
+                else:
+                    initial_swarm = [{"role": "Generalist", "goal": user_input}]
+            
+            # Enter Swarm Designer Mode to review/modify roles/goals
+            final_swarm = run_swarm_designer(initial_swarm, user_input)
+            if final_swarm is None:
+                predefined_personalities.clear()
+                write_to_monitor_log("Swarm design cancelled by user.", "WARNING")
+                continue
+                
             # Decompose goals and register tasks
             agents_config = []
             now_ts = int(time.time())
             
-            if predefined_personalities:
-                for idx, entry in enumerate(predefined_personalities):
-                    agent_role = entry.get("role", "Generalist")
-                    agent_goal = entry.get("goal") or user_input
-                    agent_id = f"{idx+1:03d}"
-                    
-                    print(f"\n[*] Decomposing goal for Agent {agent_id} ({agent_role})...")
-                    steps = generate_task_steps(agent_goal)
-                    if not steps:
-                        steps = [
-                            {
-                                "step_id": 1,
-                                "name": "General Execution",
-                                "description": f"Perform tasks for: {agent_goal}",
-                                "touched_files": [f"src/agent_{agent_id}_output.md"],
-                                "tools": ["edit_file"]
-                            }
-                        ]
-                    
-                    task_id = f"task_dynamic_{now_ts}_{idx}"
-                    register_dynamic_task(task_id, agent_goal, steps)
-                    
-                    agents_config.append({
-                        "agent_id": agent_id,
-                        "task_id": task_id,
-                        "personality": agent_role,
-                        "goal": agent_goal
-                    })
-            else:
-                agent_goal = user_input
-                print("\n[*] Decomposing task using Ollama...")
+            for idx, entry in enumerate(final_swarm):
+                agent_role = entry.get("role", "Generalist")
+                agent_goal = entry.get("goal") or user_input
+                agent_id = f"{idx+1:03d}"
+                
+                write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
                 steps = generate_task_steps(agent_goal)
                 if not steps:
                     steps = [
                         {
                             "step_id": 1,
                             "name": "General Execution",
-                            "description": f"Perform research and coordinate: {agent_goal}",
-                            "touched_files": ["src/dynamic_task_output.md"],
+                            "description": f"Perform tasks for: {agent_goal}",
+                            "touched_files": [f"src/agent_{agent_id}_output.md"],
                             "tools": ["edit_file"]
                         }
                     ]
-                task_id = f"task_dynamic_{now_ts}_0"
+                
+                task_id = f"task_dynamic_{now_ts}_{idx}"
                 register_dynamic_task(task_id, agent_goal, steps)
+                
                 agents_config.append({
-                    "agent_id": "001",
+                    "agent_id": agent_id,
                     "task_id": task_id,
-                    "personality": "Generalist",
+                    "personality": agent_role,
                     "goal": agent_goal
                 })
                 
             # Clear predefined personalities for next run
             predefined_personalities.clear()
+            
+            write_to_monitor_log(f"Starting swarm with {len(agents_config)} agents. Initializing TUI dashboard visualization...", "INFO")
             
             # Launch dynamic execution loop in dashboard
             supervisor_cmd = [
@@ -819,9 +941,6 @@ def main():
                 "--llm-provider", "ollama",
                 "--step-delay", "1.5"
             ]
-            
-            print("[*] Starting swarm. Initializing visualization...")
-            time.sleep(1.0)
             
             execute_dashboard_run(layout, supervisor_cmd)
             
