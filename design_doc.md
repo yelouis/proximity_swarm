@@ -209,4 +209,14 @@ To optimize resources and adjust spatial sensitivity based on the state of execu
   - **Debugging**: Focuses heavily on resource collisions ($W_{goal} = 0.1$, $W_{files} = 0.6$, $W_{tools} = 0.3$).
   - **Documentation**: Prioritizes goals and outputs ($W_{goal} = 0.6$, $W_{files} = 0.3$, $W_{tools} = 0.1$).
 
+---
+
+## 12. Causal Graph Tracing (Observability Layer)
+
+To debug and trace the non-deterministic trajectories of agents, the framework implements a structured causal logging layer:
+
+- **Local SQLite Adjacency List**: Stores all nodes (Agent IDs, Steps, Collisions) and edges (Spawns, State Transitions, Takeovers) locally in SQLite tables. Each edge logs timestamp, command inputs, errors, and LLM reasoning prompts.
+- **Mermaid Markdown Flowcharts**: Translates the active database timeline into a structured Markdown file containing a Mermaid syntax diagram.
+- **TUI Integration**: Introduces the `/trace [agent_id]` command which dynamically generates and displays the agent's causal lineage flow directly inside the TUI center panel. Allows developers to trace decision histories and find root-cause errors visually.
+
 
