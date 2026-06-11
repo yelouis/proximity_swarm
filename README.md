@@ -20,6 +20,8 @@ In addition to Conway's Game of Life dynamics, Proximity Swarm acts as a **Git-l
   - **Underpopulation (Isolation):** Isolated agents spawn sub-agents to explore parallel paths.
   - **Symbiosis (Converse & Learn):** Proximate agents share findings to accelerate tasks or warn of dead-ends.
 
+- **Episodic Memory (Institutional Learning):** Completed or failed agent runs are stored as episodes in a local SQLite database (`.proximity_swarm/memory.db`). Active agents query these episodes semantically at startup to preload past files and avoid repeating errors.
+
 ## Getting Started & How to Run
 
 ### 📋 Prerequisites
@@ -28,9 +30,10 @@ In addition to Conway's Game of Life dynamics, Proximity Swarm acts as a **Git-l
    ```bash
    pip install rich
    ```
-3. **Ollama**: Install [Ollama](https://ollama.com/) locally and make sure it is running. Pull the default LLM model:
+3. **Ollama**: Install [Ollama](https://ollama.com/) locally and make sure it is running. Pull the default LLM and embedding models:
    ```bash
    ollama pull gemma4:latest
+   ollama pull nomic-embed-text
    ```
 
 ### 🚀 Running the System
@@ -48,7 +51,8 @@ python3 cli.py
 ```
 *   **In-TUI Commands**:
     *   `/help` - Show all dashboard CLI commands and targets.
-    *   `/clean [target]` - Granularly purge storage artifacts (e.g., `/clean logs`, `/clean workspaces`, `/clean tombstones`, or specific filenames like `/clean quicksort.py`).
+    *   `/memory` - Display past recorded run episodes, including goal, role, status, and agent self-reflections.
+    *   `/clean [target]` - Granularly purge storage artifacts (e.g., `/clean logs`, `/clean workspaces`, `/clean tombstones`, `/clean memory`, or specific filenames like `/clean quicksort.py`).
     *   `/exit` - Exit the dashboard.
 
 #### 2. Run the Redundant Goal Collision Demo
