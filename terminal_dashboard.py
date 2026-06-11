@@ -33,6 +33,165 @@ MOCK_TASKS_FILE = os.path.join(os.getcwd(), "mock_tasks.json")
 OLLAMA_MODEL = "gemma4:latest"
 
 predefined_personalities = []
+current_view = "combined"
+
+
+def build_agent_tree():
+    agents_dir = os.path.join(STATE_DIR, "agents")
+    if not os.path.exists(agents_dir):
+        return {}
+        
+    tree = {}
+    for filename in os.listdir(agents_dir):
+        if filename.endswith(".json"):
+            filepath = os.path.join(agents_dir, filename)
+            data = load_json(filepath)
+            if data and "id" in data:
+                aid = data["id"]
+                pid = data.get("parent_id")
+                if pid == "None" or not pid:
+                    pid = None
+                
+                if aid not in tree:
+                    tree[aid] = {
+                        "id": aid,
+                        "parent_id": pid,
+                        "children": [],
+                        "state": data
+                    }
+                else:
+                    tree[aid]["state"] = data
+                    tree[aid]["parent_id"] = pid
+
+    for aid, node in tree.items():
+        pid = node["parent_id"]
+        if pid and pid in tree:
+            if aid not in tree[pid]["children"]:
+                tree[pid]["children"].append(aid)
+                
+    return tree
+
+
+def get_agent_workspace_content(agent_id, raw_if_single=False):
+    agent_ws = os.path.join(STATE_DIR, "workspaces", f"agent_{agent_id}")
+    if not os.path.exists(agent_ws):
+        return ""
+        
+    found_files = []
+    for root, dirs, files in os.walk(agent_ws):
+        for file in files:
+            if file.endswith((".pyc", ".pyo")) or "__pycache__" in root:
+                continue
+            path = os.path.join(root, file)
+            found_files.append(path)
+            
+    if not found_files:
+        return ""
+        
+    found_files.sort()
+    
+    if raw_if_single and len(found_files) == 1:
+        try:
+            with open(found_files[0], 'r') as f:
+                return f.read()
+        except Exception as e:
+            return f"Error reading file: {e}"
+            
+    sections = []
+    for filepath in found_files:
+        rel_path = os.path.relpath(filepath, agent_ws)
+        try:
+            with open(filepath, 'r') as f:
+                content = f.read()
+        except Exception as e:
+            content = f"Error reading file: {e}"
+            
+        ext = os.path.splitext(rel_path)[1].lower()
+        if ext == '.py':
+            formatted_content = f"```python\n{content}\n```"
+        elif ext == '.json':
+            formatted_content = f"```json\n{content}\n```"
+        elif ext in ['.md', '.txt']:
+            formatted_content = content
+        else:
+            formatted_content = f"```\n{content}\n```"
+            
+        sections.append(f"### File: `{rel_path}`\n\n{formatted_content}\n")
+        
+    return "\n".join(sections)
+
+
+def synthesize_node(node_id, tree, level=0):
+    node = tree[node_id]
+    state = node["state"]
+    role = state.get("personality", "Generalist")
+    goal = state.get("goal", "")
+    
+    parent_content = get_agent_workspace_content(node_id, raw_if_single=True)
+    
+    children_ids = sorted(node["children"])
+    if not children_ids:
+        if not parent_content.strip():
+            return f"*(No output from Agent {node_id} yet)*"
+        return parent_content
+        
+    children_syntheses = []
+    for cid in children_ids:
+        csyn = synthesize_node(cid, tree, level + 1)
+        children_syntheses.append((cid, csyn))
+        
+    if len(children_syntheses) == 1:
+        children_combined = children_syntheses[0][1]
+    else:
+        sibling_blocks = []
+        for cid, csyn in children_syntheses:
+            cstate = tree[cid]["state"]
+            crole = cstate.get("personality", "Generalist")
+            cgoal = cstate.get("goal", "")
+            sibling_blocks.append(
+                f"#### Agent {cid} ({crole}): {cgoal}\n\n{csyn}"
+            )
+        children_combined = "\n\n---\n\n".join(sibling_blocks)
+        
+    result_parts = []
+    header = f"## Agent {node_id} ({role}): {goal}"
+    result_parts.append(header)
+    
+    if parent_content.strip():
+        result_parts.append(parent_content)
+    else:
+        result_parts.append(f"*(Agent {node_id} is coordinating sub-agents)*")
+        
+    result_parts.append(f"### Sub-Agent Contributions to Agent {node_id}")
+    result_parts.append(children_combined)
+    
+    return "\n\n".join(result_parts)
+
+
+def generate_combined_synthesis():
+    tree = build_agent_tree()
+    if not tree:
+        return "No agent states found. Execute a task to start."
+        
+    roots = [aid for aid, node in tree.items() if node["parent_id"] is None]
+    roots.sort()
+    
+    if not roots:
+        roots = sorted(list(tree.keys()))
+        
+    if not roots:
+        return "No agents found to synthesize."
+        
+    if len(roots) == 1:
+        return synthesize_node(roots[0], tree, 0)
+        
+    root_blocks = []
+    for rid in roots:
+        rsyn = synthesize_node(rid, tree, 0)
+        root_blocks.append(rsyn)
+        
+    return "# Combined Swarm Main Artifact\n\n" + "\n\n---\n\n".join(root_blocks)
+
 
 console = Console()
 
@@ -286,63 +445,49 @@ def make_agents_table():
 
 
 def make_output_panel():
-    """Renders the contents of the generated workspace files."""
-    workspaces_dir = os.path.join(STATE_DIR, "workspaces")
-    if not os.path.exists(workspaces_dir):
-        return Panel(
-            Align.center(Text("Waiting for agent output...", style="dim yellow")),
-            title="Swarm Output / Answer Viewer",
-            border_style="cyan"
-        )
-        
-    found_files = []
-    for root, dirs, files in os.walk(workspaces_dir):
-        for file in files:
-            if file.endswith((".pyc", ".pyo")) or "__pycache__" in root:
-                continue
-            path = os.path.join(root, file)
-            found_files.append((path, os.path.getmtime(path)))
+    """Renders either the combined hierarchical synthesis or a specific agent's workspace files."""
+    if current_view == "combined":
+        content = generate_combined_synthesis()
+        # Truncate content to avoid terminal overflow
+        lines = content.splitlines()
+        if len(lines) > 40:
+            content_displayed = "\n".join(lines[:40]) + "\n\n... [Truncated due to length] ..."
+        else:
+            content_displayed = content
             
-    if not found_files:
+        display_element = Syntax(content_displayed, "markdown", theme="monokai")
         return Panel(
-            Align.center(Text("No files generated yet...", style="dim yellow")),
-            title="Swarm Output / Answer Viewer",
+            display_element,
+            title="Swarm Output / Answer Viewer (View: Combined Hierarchy | Type '/view <id>' to toggle)",
             border_style="cyan"
         )
-        
-    # Sort files by modification time (most recent first)
-    found_files.sort(key=lambda x: x[1], reverse=True)
-    latest_file_path = found_files[0][0]
-    
-    # Read the file contents
-    try:
-        with open(latest_file_path, 'r') as f:
-            content = f.read()
-    except Exception as e:
-        content = f"Error reading file: {e}"
-        
-    filename = os.path.basename(latest_file_path)
-    rel_path = os.path.relpath(latest_file_path, workspaces_dir)
-    
-    # Truncate content to avoid terminal overflow
-    lines = content.splitlines()
-    if len(lines) > 40:
-        content_displayed = "\n".join(lines[:40]) + "\n\n... [Truncated due to length] ..."
     else:
-        content_displayed = content
-        
-    if filename.endswith(".py"):
-        display_element = Syntax(content_displayed, "python", theme="monokai", line_numbers=True)
-    elif filename.endswith(".md"):
+        tree = build_agent_tree()
+        if current_view not in tree:
+            valid_ids = sorted(list(tree.keys()))
+            valid_str = f"Valid IDs: {', '.join(valid_ids)}" if valid_ids else "No agents active yet."
+            return Panel(
+                Align.center(Text(f"Agent '{current_view}' not found in active swarm.\n{valid_str}", style="dim yellow")),
+                title="Swarm Output / Answer Viewer (View: Error)",
+                border_style="cyan"
+            )
+            
+        content = get_agent_workspace_content(current_view, raw_if_single=False)
+        if not content.strip():
+            content_displayed = f"*(No output files generated by Agent {current_view} yet)*"
+        else:
+            lines = content.splitlines()
+            if len(lines) > 40:
+                content_displayed = "\n".join(lines[:40]) + "\n\n... [Truncated due to length] ..."
+            else:
+                content_displayed = content
+                
         display_element = Syntax(content_displayed, "markdown", theme="monokai")
-    else:
-        display_element = Text(content_displayed, style="green")
-        
-    return Panel(
-        display_element,
-        title=f"Swarm Output / Answer Viewer (File: {rel_path})",
-        border_style="cyan"
-    )
+        return Panel(
+            display_element,
+            title=f"Swarm Output / Answer Viewer (View: Agent {current_view} | Type '/view combined' to return)",
+            border_style="cyan"
+        )
 
 
 def make_collisions_panel():
@@ -864,11 +1009,30 @@ def main():
                 time.sleep(1.5)
                 continue
 
+            if cmd == "/view":
+                if not arg:
+                    current_view = "combined"
+                    print("\n\033[1;32m[+] View set to: Combined Hierarchy\033[0m")
+                else:
+                    target_view = arg.strip().lower()
+                    if target_view in ["combined", "main"]:
+                        current_view = "combined"
+                        print("\n\033[1;32m[+] View set to: Combined Hierarchy\033[0m")
+                    else:
+                        if target_view.isdigit():
+                            target_view = f"{int(target_view):03d}"
+                        current_view = target_view
+                        print(f"\n\033[1;32m[+] View set to Agent: {current_view}\033[0m")
+                time.sleep(1.0)
+                continue
+
             if cmd == "/help":
                 print("\n\033[1;33mAvailable Dashboard CLI Commands:\033[0m")
                 print("  /help                     - Show this help dialogue")
                 print("  /add-agent <role> : <goal> - Predefine custom agent role and dedicated goal")
                 print("                              (e.g., '/add-agent Tester : Write tests')")
+                print("  /view [combined/id]       - Switch between combined tree synthesis and individual agent outputs")
+                print("                              (e.g., '/view 001' or '/view combined')")
                 print("  /clean [target]           - Clean specific storage/files rather than everything.")
                 print("                              Supported targets: 'logs', 'workspaces', 'collisions',")
                 print("                              'tombstones', 'tasks', 'all', or a specific filename")

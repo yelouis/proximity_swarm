@@ -149,3 +149,18 @@ A dedicated test suite is built under `/tests` to verify both supervisor logic, 
 - **`tests/test_v2.py`**: Validates consensus-gate approvals/rejections, cascading process terminations, and deconfliction offsets.
 - **`tests/test_clean.py`**: Validates granular command inputs and recursive workspace file deletions.
 - **`tests/test_personalities.py`**: Validates custom agent role/goal command registration and persistence in the runner.
+- **`tests/test_artifact_combination.py`**: Validates tree topology mappings, sibling merges, and recursive upward hierarchical syntheses.
+
+---
+
+## 7. Hierarchical Artifact Combination & Swarm Viewer
+
+Proximity Swarm V2 provides a hierarchical combination engine to aggregate and display agent deliverables in structured Markdown formats:
+
+- **Process Tree Mapping**: Scans active agent JSON state files recursively to build parent-child links.
+- **Upward Synthesis**: Merges child sub-agent outcomes recursively upward into their parent agent's workspace outputs.
+- **Level Sibling Combination**: Concatenates same-level sibling agent outputs side-by-side with distinct Markdown headers.
+- **TUI Viewer Command (`/view`)**: Toggles the center column output viewer between:
+  - `combined`: Default recursive tree-synthesized main artifact.
+  - `<agent_id>`: Individual agent workspace files (supporting single raw markdown or multi-file grouping).
+
