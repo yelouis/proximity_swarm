@@ -4,6 +4,7 @@ import json
 import tempfile
 import shutil
 import unittest
+import unittest.mock
 
 # Ensure parent directory is in path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -13,7 +14,10 @@ from terminal_dashboard import (
     build_agent_tree,
     get_agent_workspace_content,
     synthesize_node,
-    generate_combined_synthesis
+    generate_combined_synthesis,
+    compute_swarm_state_hash,
+    synthesis_cache,
+    bg_generate_synthesis
 )
 
 
@@ -29,6 +33,9 @@ class TestArtifactCombination(unittest.TestCase):
         
         os.makedirs(os.path.join(self.test_dir, "agents"), exist_ok=True)
         os.makedirs(os.path.join(self.test_dir, "workspaces"), exist_ok=True)
+        
+        # Reset cache
+        synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
 
     def tearDown(self):
         shutil.rmtree(self.test_dir)
@@ -89,7 +96,10 @@ class TestArtifactCombination(unittest.TestCase):
         content_single = get_agent_workspace_content(agent_id, raw_if_single=True)
         self.assertEqual(content_single.strip(), "Unified Answer Report Only")
 
-    def test_generate_combined_synthesis(self):
+    @unittest.mock.patch('terminal_dashboard.is_ollama_running')
+    def test_generate_combined_synthesis_fallback(self, mock_is_running):
+        mock_is_running.return_value = False
+        
         # Create hierarchy
         agent_001 = {"id": "001", "parent_id": None, "goal": "Write core library", "personality": "Architect"}
         agent_002 = {"id": "002", "parent_id": "001", "goal": "Write unit tests", "personality": "QA"}
@@ -109,20 +119,62 @@ class TestArtifactCombination(unittest.TestCase):
                 
         # Generate combined synthesis
         synthesis = generate_combined_synthesis()
+        # Initial run triggers generating state
+        self.assertIn("Generating LLM hierarchical synthesis", synthesis)
         
-        # Verify structure:
-        # Parent Agent 001 header and content should be at top level
-        self.assertIn("## Agent 001 (Architect): Write core library", synthesis)
-        self.assertIn("Core API logic", synthesis)
+        # Call bg worker directly to populate cache (fallback since Ollama is forced to False)
+        h = compute_swarm_state_hash()
+        bg_generate_synthesis(h)
         
-        # Sub-agent contributions header
-        self.assertIn("### Sub-Agent Contributions to Agent 001", synthesis)
+        # Now call generate_combined_synthesis again, it should return cached synthesis fallback content
+        result = generate_combined_synthesis()
+        self.assertIn("## Agent 001 (Architect): Write core library", result)
+        self.assertIn("Core API logic", result)
+        self.assertIn("#### Agent 002 (QA): Write unit tests", result)
+
+    @unittest.mock.patch('terminal_dashboard.is_ollama_running')
+    @unittest.mock.patch('terminal_dashboard.call_ollama_raw')
+    def test_generate_combined_synthesis_llm(self, mock_call, mock_is_running):
+        mock_is_running.return_value = True
+        mock_call.return_value = "Mocked LLM Synthesis Content"
         
-        # Children are siblings at same level, so their headers & contents should be combined
-        self.assertIn("#### Agent 002 (QA): Write unit tests", synthesis)
-        self.assertIn("Unit test implementation", synthesis)
-        self.assertIn("#### Agent 003 (Technical Writer): Write docs", synthesis)
-        self.assertIn("API docs markdown", synthesis)
+        # Create hierarchy
+        agent_001 = {"id": "001", "parent_id": None, "goal": "Write core library", "personality": "Architect"}
+        agents_dir = os.path.join(self.test_dir, "agents")
+        with open(os.path.join(agents_dir, "agent_001.json"), 'w') as f:
+            json.dump(agent_001, f)
+                
+        ws_dir = os.path.join(self.test_dir, "workspaces", "agent_001")
+        os.makedirs(ws_dir, exist_ok=True)
+        with open(os.path.join(ws_dir, "answer.md"), 'w') as f:
+            f.write("Some code")
+            
+        h = compute_swarm_state_hash()
+        bg_generate_synthesis(h)
+        
+        result = generate_combined_synthesis()
+        self.assertEqual(result, "Mocked LLM Synthesis Content")
+
+    def test_compute_swarm_state_hash(self):
+        h1 = compute_swarm_state_hash()
+        
+        # Create an agent state
+        agent_001 = {"id": "001", "parent_id": None, "goal": "Goal"}
+        agents_dir = os.path.join(self.test_dir, "agents")
+        with open(os.path.join(agents_dir, "agent_001.json"), 'w') as f:
+            json.dump(agent_001, f)
+            
+        h2 = compute_swarm_state_hash()
+        self.assertNotEqual(h1, h2)
+        
+        # Create a workspace file
+        ws_dir = os.path.join(self.test_dir, "workspaces", "agent_001")
+        os.makedirs(ws_dir, exist_ok=True)
+        with open(os.path.join(ws_dir, "answer.md"), 'w') as f:
+            f.write("Some files")
+            
+        h3 = compute_swarm_state_hash()
+        self.assertNotEqual(h2, h3)
 
 
 if __name__ == "__main__":

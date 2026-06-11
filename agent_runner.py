@@ -145,6 +145,8 @@ class AgentRunner:
         os.makedirs(self.workspace_dir, exist_ok=True)
         
         self.state = self.load_or_init_state()
+        self.historical_context = None
+        self.load_historical_context()
 
     def apply_offset_to_files(self, files):
         if not self.offset_suffix:
@@ -208,6 +210,121 @@ class AgentRunner:
         print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}' (Offset: {self.offset_suffix}) with role '{self.personality}' and goal '{state['goal']}'.")
         return state
 
+    def load_historical_context(self):
+        """Loads historical context from episodic memory matching the goal."""
+        try:
+            import memory_store
+            query_goal = self.custom_goal or (self.state.get("goal") if hasattr(self, "state") else None)
+            if query_goal:
+                matches = memory_store.query_similar_episodes(query_goal, top_k=1, model=self.ollama_model)
+                if matches and matches[0]["score"] >= 0.5:
+                    match = matches[0]
+                    self.historical_context = (
+                        f"=== HISTORICAL EPISODE CONTEXT ===\n"
+                        f"A similar task was previously executed.\n"
+                        f"Past Goal: {match['goal']}\n"
+                        f"Role: {match['role']}\n"
+                        f"Status: {match['status']}\n"
+                        f"Reflection: {match['reflection']}\n"
+                        f"Errors encountered: {match['errors']}\n"
+                        f"Final workspace files summary: {match['deliverable_summary']}\n"
+                        f"=================================="
+                    )
+                    print(f"[Memory] Loaded historical episode from memory (Score: {match['score']:.2f})")
+        except Exception as e:
+            print(f"[Memory Error] Failed to retrieve episodic memory: {e}")
+
+    def save_memory_episode(self, status=None, error_message=None):
+        """Generates self-reflection/summary and saves this agent run to the memory store."""
+        if not status:
+            status = self.state.get("status", "unknown")
+            
+        if hasattr(self, "_memory_saved") and self._memory_saved:
+            return
+        self._memory_saved = True
+        
+        # Get list of executed steps
+        tasks_data = load_json(MOCK_TASKS_FILE)
+        task_id = self.state.get("task_id")
+        steps_info = []
+        if tasks_data and task_id in tasks_data.get("tasks", {}):
+            task_steps = tasks_data["tasks"][task_id].get("steps", [])
+            completed_steps = self.state.get("steps_completed", 0)
+            for idx in range(min(completed_steps, len(task_steps))):
+                steps_info.append({
+                    "step_id": task_steps[idx].get("step_id"),
+                    "name": task_steps[idx].get("name"),
+                    "description": task_steps[idx].get("description")
+                })
+                
+        # Collect final deliverable summary
+        touched_files = self.state.get("touched_files", [])
+        files_summary = ""
+        for f in touched_files:
+            f_path = os.path.join(self.workspace_dir, f)
+            if os.path.exists(f_path):
+                try:
+                    with open(f_path, 'r') as file_obj:
+                        lines = file_obj.read().splitlines()
+                        summary_snippet = "\n".join(lines[:10])
+                        if len(lines) > 10:
+                            summary_snippet += "\n..."
+                        files_summary += f"File '{f}':\n{summary_snippet}\n\n"
+                except Exception:
+                    pass
+                    
+        # Generate LLM-based deliverable summary and reflection
+        reflection = ""
+        deliverable_desc = ""
+        steps_summary_text = "\n".join([f"- Step {s['step_id']}: {s['name']} - {s['description']}" for s in steps_info])
+        errors_text = error_message or ""
+        
+        if self.llm_provider == "ollama" and is_ollama_running():
+            # Generate Reflection
+            refl_prompt = (
+                f"You are Agent {self.agent_id} with the role/personality: '{self.state.get('personality', 'Generalist')}' and goal: '{self.state['goal']}'.\n"
+                f"You finished execution with status: '{status}'.\n"
+                f"Steps executed:\n{steps_summary_text}\n"
+                f"Errors/Tombstones hit: '{errors_text}'\n\n"
+                f"Write a brief, 2-3 sentence self-reflection summarizing what you accomplished, what went wrong (if anything), and lessons learned for future agents. "
+                f"Do not include any conversational intro/outro or explanations. Output ONLY the self-reflection."
+            )
+            reflection = call_ollama_raw(refl_prompt, model=self.ollama_model)
+            
+            # Generate Deliverable summary
+            deliv_prompt = (
+                f"Summarize the final output files and accomplishments of the task in one concise sentence based on the following files content:\n"
+                f"{files_summary}\n\n"
+                f"Output ONLY the one-sentence summary."
+            )
+            deliverable_desc = call_ollama_raw(deliv_prompt, model=self.ollama_model)
+            
+        # Fallbacks if LLM failed or offline
+        if not reflection:
+            if status == "completed":
+                reflection = f"Completed all {len(steps_info)} steps of the task successfully. Delivered the required artifacts without encountering blocking traps."
+            else:
+                reflection = f"Failed to complete task. Encountered blocking trap error: {errors_text or 'unknown error'}. Tombstone registered for future runs."
+                
+        if not deliverable_desc:
+            deliverable_desc = f"Generated {len(touched_files)} files: {', '.join(touched_files)}"
+            
+        try:
+            import memory_store
+            memory_store.save_episode(
+                goal=self.state["goal"],
+                role=self.state.get("personality", "Generalist"),
+                status=status,
+                steps=steps_info,
+                errors=errors_text,
+                deliverable_summary=deliverable_desc.strip(),
+                reflection=reflection.strip(),
+                model=self.ollama_model
+            )
+            print(f"[Memory] Successfully saved execution episode to memory store (Status: {status})")
+        except Exception as e:
+            print(f"[Memory Error] Failed to save episodic memory: {e}")
+
     def check_tombstones(self, files, tools):
         """Query tombstones.json to check if any upcoming command/file matches a known dead-end."""
         tombstones = load_json(TOMBSTONES_FILE) or []
@@ -261,6 +378,7 @@ class AgentRunner:
             self.state["status"] = "completed"
             self.state["progress"] = 100
             save_json(self.state_file, self.state)
+            self.save_memory_episode()
             return
             
         current_step = steps[completed_count]
@@ -294,7 +412,10 @@ class AgentRunner:
             
             content = f"# Agent {self.agent_id} completed {current_step['name']} at {time.time()}\n"
             if self.llm_provider == "ollama" and is_ollama_running():
-                prompt = (
+                prompt = ""
+                if getattr(self, "historical_context", None):
+                    prompt += self.historical_context + "\n\n"
+                prompt += (
                     f"You are Agent {self.agent_id} with the role/personality: '{self.state.get('personality', 'Generalist')}' working on the task: '{self.state['goal']}'.\n"
                     f"Current Step: {current_step['name']}\n"
                     f"Description: {current_step['description']}\n"
@@ -341,6 +462,7 @@ class AgentRunner:
             
             self.state["status"] = "pending_termination"
             save_json(self.state_file, self.state)
+            self.save_memory_episode(status="failed", error_message=error_msg)
             print(f"  Agent {self.agent_id} is pending termination approval from Supervisor.")
             return
             

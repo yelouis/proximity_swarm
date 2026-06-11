@@ -158,9 +158,31 @@ A dedicated test suite is built under `/tests` to verify both supervisor logic, 
 Proximity Swarm V2 provides a hierarchical combination engine to aggregate and display agent deliverables in structured Markdown formats:
 
 - **Process Tree Mapping**: Scans active agent JSON state files recursively to build parent-child links.
-- **Upward Synthesis**: Merges child sub-agent outcomes recursively upward into their parent agent's workspace outputs.
-- **Level Sibling Combination**: Concatenates same-level sibling agent outputs side-by-side with distinct Markdown headers.
-- **TUI Viewer Command (`/view`)**: Toggles the center column output viewer between:
-  - `combined`: Default recursive tree-synthesized main artifact.
-  - `<agent_id>`: Individual agent workspace files (supporting single raw markdown or multi-file grouping).
+- **Asynchronous LLM Bottom-Up Synthesis**: Generates a fully LLM-synthesized report via local Ollama (`gemma4:latest`) executing in a background worker thread (`bg_generate_synthesis`). While running, the TUI renders a loading message and prevents execution loop freezes.
+- **State Hash Caching**: Computes MD5 signatures over agent JSON states and workspace files. The background LLM task is skipped if the current signature matches the cached value.
+- **Prompt Architecture**: Summarizes leaf workspace files first, merges sibling agent outcomes on the same depth, and integrates child reports upward into parent contexts recursively.
+- **Fallback**: Automatically falls back to clean deterministic Markdown tree merges if Ollama is disabled or unreachable.
+- **TUI Viewer Command (`/view`)**: Toggles the center column output viewer between the combined synthesis and individual agent files.
+
+---
+
+## 8. User Interface Enhancements
+
+- **Embedded Swarm Designer TUI**: Integrates the designer CLI prompt directly within the main dashboard layout. Left, Center, and Footer panels dynamically shift to show custom configurations, task instructions, and designer help documentation without screen clearance or shifting.
+- **Context-Aware Command Help Banners**: Shows a permanent commands banner (`/add-agent`, `/view`, `/clean`) in the TUI logs footer during idle phases, shifting to a designer reference helper during agent layout setup.
+
+---
+
+## 9. Episodic Memory System
+
+Proximity Swarm V2 integrates an Episodic Memory System for agent runs to facilitate long-term institutional learning:
+
+- **Local Vector Database**: Persists completed/failed runs under `.proximity_swarm/memory.db` using SQLite. Schema includes goal, role/personality, status, step metadata, errors, deliverable summaries, and self-reflection text.
+- **Ollama Embeddings with TF-IDF Fallback**: Generates semantic embeddings for query tasks using Ollama's embeddings API. If Ollama is offline or vector generation fails, it builds a TF-IDF vocabulary on all stored goals and computes Cosine similarity over term-frequency vectors.
+- **Hybrid Lifecycle Integration**:
+  1. **Swarm Designer Setup**: Retrieves similar past runs to provide reference context to the Ollama recommendations prompt.
+  2. **Agent Runner Startup**: Queries the database for the agent's specific goal. If a highly similar past episode is found, its reflection, steps, and error signatures are injected into the agent runner's prompt as historical guidance.
+  3. **Agent Completion**: On run completion (success/failure), the runner calls local Ollama (or a rule-based generator if offline) to construct a 2-3 sentence self-reflection summary, then writes the full episode context to memory.
+- **TUI Management**: Exposes `/memory` command to display a summary table of past runs, and `/clean memory` to purge SQLite logs.
+
 
