@@ -185,4 +185,15 @@ Proximity Swarm V2 integrates an Episodic Memory System for agent runs to facili
   3. **Agent Completion**: On run completion (success/failure), the runner calls local Ollama (or a rule-based generator if offline) to construct a 2-3 sentence self-reflection summary, then writes the full episode context to memory.
 - **TUI Management**: Exposes `/memory` command to display a summary table of past runs, and `/clean memory` to purge SQLite logs.
 
+---
+
+## 10. Three-Tiered Hierarchical Swarm Scaling
+
+To scale complex task decomposition and coordinate functional groups, the architecture supports a three-tiered hierarchical model (Orchestrator -> Sub-Swarms -> Agents):
+
+- **Orchestrator Coordination**: A top-level dynamic planner decomposes overall macro goals into a dependency tree of sub-goals. Sub-swarms are spawned dynamically as their macro-dependencies are resolved.
+- **Global Workspace & Cross-Swarm Takeovers**: Sub-swarms share a unified workspace directory structure to facilitate maximum information sharing. The Proximity Monitor runs globally across all active agents. If two agents in different sub-swarms duplicate goals/resources, they undergo deconfliction negotiation where one agent takes over.
+- **Dynamic Multi-Parent Links**: When a cross-swarm takeover occurs, the surviving agent is dynamically linked as a child to the parents of both sub-swarms. The supervisor updates the dependency tree so that both parent branches await the surviving agent's completion.
+- **Dependency-Gated Lifecycle**: Sub-swarms are initialized dynamically and are marked complete only when all of their active leaf agents finish execution and the consensus-gating framework approves the unified hierarchical synthesis of their deliverables.
+
 
