@@ -183,6 +183,21 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         running_processes[agent_id] = subprocess.Popen(cmd)
 
 
+    # Initialize trace nodes for initial agents
+    try:
+        import causal_tracer
+        for a in initial_agents:
+            aid = a["agent_id"]
+            causal_tracer.add_node(
+                f"agent_{aid}",
+                "agent",
+                f"Agent {aid} ({a.get('personality', 'Generalist')})",
+                {"goal": a.get("goal")}
+            )
+            causal_tracer.log_state_transition(aid, "none", "exploring")
+    except Exception:
+        pass
+
     # Launch initial agents (only if their sub-swarm is active!)
     for idx, agent_info in enumerate(initial_agents):
         agent_id = agent_info["agent_id"]

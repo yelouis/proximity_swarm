@@ -417,6 +417,18 @@ def purge_artifacts(target=None):
             print("[+] Successfully purged episodic memory database.")
         except Exception as e:
             pass
+
+        # Clean trace database too
+        try:
+            import causal_tracer
+            if os.path.exists(causal_tracer.DB_PATH):
+                os.remove(causal_tracer.DB_PATH)
+            md_path = os.path.join(STATE_DIR, "causal_graph.md")
+            if os.path.exists(md_path):
+                os.remove(md_path)
+            print("[+] Successfully purged causal trace database.")
+        except Exception:
+            pass
         return
 
     # Specific targets
@@ -486,6 +498,18 @@ def purge_artifacts(target=None):
             print("[+] Successfully purged episodic memory database.")
         except Exception as e:
             print(f"[-] Error purging episodic memory: {e}")
+            
+    elif t_lower in ["trace", "traces", "causal"]:
+        try:
+            import causal_tracer
+            if os.path.exists(causal_tracer.DB_PATH):
+                os.remove(causal_tracer.DB_PATH)
+            md_path = os.path.join(STATE_DIR, "causal_graph.md")
+            if os.path.exists(md_path):
+                os.remove(md_path)
+            print("[+] Successfully purged causal trace database.")
+        except Exception as e:
+            print(f"[-] Error purging causal trace: {e}")
             
     else:
         # Check recursive file matches under workspaces directory
@@ -650,6 +674,66 @@ def make_output_panel():
             title="Swarm Output / Answer Viewer (View: Combined Hierarchy | Type '/view <id>' to toggle)",
             border_style="cyan"
         )
+    elif current_view.startswith("trace_"):
+        agent_id = current_view.replace("trace_", "")
+        import causal_tracer
+        mermaid_text = causal_tracer.generate_mermaid_graph(agent_id)
+        
+        conn = causal_tracer.get_db_connection()
+        try:
+            events = conn.execute("""
+                SELECT source, target, type, timestamp, details FROM trace_edges 
+                WHERE source = ? OR target = ?
+                ORDER BY timestamp ASC
+            """, (f"agent_{agent_id}", f"agent_{agent_id}")).fetchall()
+        except Exception:
+            events = []
+        finally:
+            conn.close()
+            
+        timeline_lines = []
+        for ev in events:
+            t_str = time.strftime("%H:%M:%S", time.localtime(ev["timestamp"]))
+            details = json.loads(ev["details"]) if ev["details"] else {}
+            etype = ev["type"]
+            
+            if etype == "spawn":
+                if ev["target"] == f"agent_{agent_id}":
+                    parent_part = ev["source"].replace("agent_", "")
+                    timeline_lines.append(f"[{t_str}] 🚀 Spawned by Parent Agent {parent_part}")
+                else:
+                    child_part = ev["target"].replace("agent_", "")
+                    timeline_lines.append(f"[{t_str}] 🚀 Spawned Child Agent {child_part}")
+            elif etype == "state_transition":
+                timeline_lines.append(f"[{t_str}] 🔄 State Transition: {details.get('old_status')} -> {details.get('new_status')}")
+            elif etype == "step_exec":
+                timeline_lines.append(f"[{t_str}] 📝 Step: {details.get('step_name')} ({details.get('status')})")
+            elif etype == "collision_entry":
+                timeline_lines.append(f"[{t_str}] ⚠️ Collision detected with peer")
+            elif etype == "takeover_survivor":
+                timeline_lines.append(f"[{t_str}] ⚔️ Collision negotiation: SURVIVOR of takeover")
+            elif etype == "takeover_loser":
+                timeline_lines.append(f"[{t_str}] 💀 Collision negotiation: TERMINATED by takeover")
+            else:
+                timeline_lines.append(f"[{t_str}] Edge: {etype}")
+                
+        timeline_text = "\n".join(timeline_lines)
+        content = (
+            f"# Causal Trace Lineage: Agent {agent_id}\n\n"
+            f"### 📊 Flowchart (Mermaid syntax)\n"
+            f"```mermaid\n"
+            f"{mermaid_text}\n"
+            f"```\n\n"
+            f"### 🕒 Chronological Timeline of Events\n"
+            f"{timeline_text or '*(No events logged for this agent yet)*'}"
+        )
+        
+        display_element = Syntax(content, "markdown", theme="monokai")
+        return Panel(
+            display_element,
+            title=f"Swarm Output / Answer Viewer (View: Trace Agent {agent_id} | Type '/view combined' to return)",
+            border_style="cyan"
+        )
     else:
         tree = build_agent_tree()
         if current_view not in tree:
@@ -748,7 +832,7 @@ def make_logs_panel():
             pass
             
     log_text = Text()
-    log_text.append("💡 Helpful Commands: /add-agent <role> : <goal> | /view [combined/id] | /clean [target] | /memory | /exit\n", style="bold yellow")
+    log_text.append("💡 Helpful Commands: /add-agent <role> : <goal> | /view [combined/id] | /clean [target] | /memory | /trace <id> | /exit\n", style="bold yellow")
     log_text.append("-" * 90 + "\n", style="dim white")
     
     if logs_lines:
@@ -1417,6 +1501,35 @@ def main():
                 time.sleep(1.0)
                 continue
 
+            if cmd == "/trace":
+                if not arg:
+                    print("\n\033[1;31m[-] Error: Usage: /trace <agent_id> (e.g. '/trace 001')\033[0m")
+                    time.sleep(2.0)
+                    continue
+                target_agent = arg.strip()
+                if target_agent.isdigit():
+                    target_agent = f"{int(target_agent):03d}"
+                
+                # Check if this agent node exists
+                import causal_tracer
+                conn = causal_tracer.get_db_connection()
+                try:
+                    node = conn.execute("SELECT id FROM trace_nodes WHERE id = ?", (f"agent_{target_agent}",)).fetchone()
+                except Exception:
+                    node = None
+                finally:
+                    conn.close()
+                
+                if not node:
+                    print(f"\n\033[1;31m[-] Error: Agent '{target_agent}' not found in causal traces.\033[0m")
+                    time.sleep(2.0)
+                    continue
+                
+                current_view = f"trace_{target_agent}"
+                print(f"\n\033[1;32m[+] View set to trace: Agent {target_agent}\033[0m")
+                time.sleep(1.0)
+                continue
+
             if cmd in ["/memory", "/history"]:
                 try:
                     import memory_store
@@ -1470,6 +1583,7 @@ def main():
                 print("                              'tombstones', 'tasks', 'memory', 'all', or a specific filename")
                 print("  /delete-artifacts         - Synonym for /clean")
                 print("  /memory                   - Display past recorded run episodes")
+                print("  /trace <agent_id>         - Display visual Mermaid flowchart and chronological event timeline")
                 print("  /exit                     - Exit the TUI Dashboard\n")
                 print("Press Enter to return to dashboard...")
                 input()

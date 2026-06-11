@@ -321,6 +321,12 @@ def handle_spawn_requests(agents):
             save_agent_state(agent)
             
             logging.info(f"Spawned Child Agent {child_id} for Parent Agent {agent['id']}.")
+            try:
+                import causal_tracer
+                causal_tracer.log_agent_spawn(agent["id"], child_id, spawn_req.get("goal"))
+                causal_tracer.log_state_transition(child_id, "none", "exploring")
+            except Exception:
+                pass
 
 
 def evaluate_consensus_gate(agents):
@@ -371,6 +377,11 @@ def evaluate_consensus_gate(agents):
                     f"[CONSENSUS APPROVED] Agent {agent['id']} termination approved. "
                     f"Branch covered by active Agent {covering_agent_id}."
                 )
+                try:
+                    import causal_tracer
+                    causal_tracer.log_state_transition(agent["id"], "pending_termination", "dead", {"reason": f"consensus approved, covered by {covering_agent_id}"})
+                except Exception:
+                    pass
             else:
                 # Extinction danger! Block termination and force agent to resume exploring
                 agent["status"] = "exploring"
@@ -379,6 +390,11 @@ def evaluate_consensus_gate(agents):
                     f"[CONSENSUS OVERRIDE] Extinction Prevention triggered! Rejected termination for Agent {agent['id']} "
                     f"as it is the last active agent covering its goal/task."
                 )
+                try:
+                    import causal_tracer
+                    causal_tracer.log_state_transition(agent["id"], "pending_termination", "exploring", {"reason": "extinction override"})
+                except Exception:
+                    pass
 
 
 def run_cascading_kills():
@@ -421,6 +437,11 @@ def run_cascading_kills():
                 if all_parents_dead:
                     child["status"] = "dead"
                     save_agent_state(child)
+                    try:
+                        import causal_tracer
+                        causal_tracer.log_state_transition(child_id, child.get("status", "exploring"), "dead", {"reason": "cascading kill from dead parents"})
+                    except Exception:
+                        pass
                     logging.warning(
                         f"[CASCADING KILL] Supervisor killed child Agent {child_id} "
                         f"recursively because all of its parents are dead."
@@ -489,6 +510,13 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                             a2['status'] = "syncing"
                             
                             collision_id = f"{a1['id']}_{a2['id']}"
+                            try:
+                                import causal_tracer
+                                causal_tracer.log_collision(collision_id, a1["id"], a2["id"], {"distance": distance})
+                                causal_tracer.log_state_transition(a1["id"], "exploring", "syncing")
+                                causal_tracer.log_state_transition(a2["id"], "exploring", "syncing")
+                            except Exception:
+                                pass
                             collision_file = os.path.join(COLLISIONS_DIR, f"collision_{collision_id}.json")
                             
                             collision_data = {

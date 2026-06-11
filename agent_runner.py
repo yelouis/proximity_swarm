@@ -393,6 +393,17 @@ class AgentRunner:
             
         current_step = steps[completed_count]
         print(f"\n[Agent {self.agent_id}] Executing Step {current_step['step_id']}/{len(steps)}: {current_step['name']}")
+        try:
+            import causal_tracer
+            causal_tracer.log_step_execution(
+                self.agent_id,
+                current_step["step_id"],
+                current_step["name"],
+                current_step["description"],
+                "executing"
+            )
+        except Exception:
+            pass
         print(f"  Description: {current_step['description']}")
         
         step_files = self.apply_offset_to_files(current_step.get("touched_files", []))
@@ -473,6 +484,19 @@ class AgentRunner:
             self.state["status"] = "pending_termination"
             save_json(self.state_file, self.state)
             self.save_memory_episode(status="failed", error_message=error_msg)
+            try:
+                import causal_tracer
+                causal_tracer.log_step_execution(
+                    self.agent_id,
+                    current_step["step_id"],
+                    current_step["name"],
+                    current_step["description"],
+                    "failed",
+                    {"error": error_msg}
+                )
+                causal_tracer.log_state_transition(self.agent_id, "exploring", "pending_termination", {"error": error_msg})
+            except Exception:
+                pass
             print(f"  Agent {self.agent_id} is pending termination approval from Supervisor.")
             return
             
@@ -504,6 +528,20 @@ class AgentRunner:
         if disk_state and disk_state.get("status") in ["syncing", "pending_termination", "dead"]:
             self.state["status"] = disk_state["status"]
 
+        try:
+            import causal_tracer
+            causal_tracer.log_step_execution(
+                self.agent_id,
+                current_step["step_id"],
+                current_step["name"],
+                current_step["description"],
+                "completed",
+                {"progress": self.state["progress"]}
+            )
+            if self.state["status"] == "completed":
+                causal_tracer.log_state_transition(self.agent_id, "exploring", "completed")
+        except Exception:
+            pass
         save_json(self.state_file, self.state)
         print(f"Step completed. Progress: {self.state['progress']}%")
 
@@ -645,6 +683,14 @@ class AgentRunner:
             if b_parents:
                 agent_b["parent_id"] = b_parents[0]
                 
+            try:
+                import causal_tracer
+                causal_tracer.log_takeover(collision_id, agent_b["id"], agent_a["id"], reason)
+                causal_tracer.log_state_transition(agent_b["id"], "syncing", "exploring")
+                causal_tracer.log_state_transition(agent_a["id"], "syncing", "pending_termination")
+            except Exception:
+                pass
+                
         elif action == "kill_b":
             agent_a["status"] = "exploring"
             agent_b["status"] = "pending_termination"
@@ -660,9 +706,23 @@ class AgentRunner:
             if a_parents:
                 agent_a["parent_id"] = a_parents[0]
                 
+            try:
+                import causal_tracer
+                causal_tracer.log_takeover(collision_id, agent_a["id"], agent_b["id"], reason)
+                causal_tracer.log_state_transition(agent_a["id"], "syncing", "exploring")
+                causal_tracer.log_state_transition(agent_b["id"], "syncing", "pending_termination")
+            except Exception:
+                pass
+                
         else:  # keep_both
             agent_a["status"] = "exploring"
             agent_b["status"] = "exploring"
+            try:
+                import causal_tracer
+                causal_tracer.log_state_transition(agent_a["id"], "syncing", "exploring", {"reason": "keep both (complementary)"})
+                causal_tracer.log_state_transition(agent_b["id"], "syncing", "exploring", {"reason": "keep both (complementary)"})
+            except Exception:
+                pass
             
         # Save states
         save_json(os.path.join(AGENTS_DIR, f"agent_{agent_a['id']}.json"), agent_a)
