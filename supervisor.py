@@ -9,6 +9,7 @@ import argparse
 
 STATE_DIR = os.path.join(os.getcwd(), ".proximity_swarm")
 LOG_FILE = os.path.join(STATE_DIR, "monitor.log")
+orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
 
 
 def clean_state():
@@ -20,6 +21,79 @@ def clean_state():
         except Exception as e:
             print(f"  Warning: failed to clear state dir: {e}")
     os.makedirs(STATE_DIR, exist_ok=True)
+
+
+def is_agent_sub_swarm_active(agent_id):
+    if not os.path.exists(orchestrator_file):
+        return True
+    try:
+        with open(orchestrator_file, 'r') as f:
+            state = json.load(f)
+        for sid, s in state.get("sub_swarms", {}).items():
+            if agent_id in s.get("agent_ids", []):
+                return s.get("status") == "active"
+    except Exception:
+        pass
+    return True
+
+
+def evaluate_sub_swarm_completion():
+    if not os.path.exists(orchestrator_file):
+        return
+    try:
+        with open(orchestrator_file, 'r') as f:
+            state = json.load(f)
+        agents_dir = os.path.join(STATE_DIR, "agents")
+        all_agents = {}
+        if os.path.exists(agents_dir):
+            for filename in os.listdir(agents_dir):
+                if filename.startswith("agent_") and filename.endswith(".json"):
+                    aid = filename.replace("agent_", "").replace(".json", "")
+                    try:
+                        with open(os.path.join(agents_dir, filename), 'r') as f_ag:
+                            all_agents[aid] = json.load(f_ag)
+                    except Exception:
+                        pass
+        updated = False
+        for sid, s in state.get("sub_swarms", {}).items():
+            if s.get("status") == "active":
+                agent_ids = s.get("agent_ids", [])
+                if not agent_ids:
+                    s["status"] = "completed"
+                    updated = True
+                    print(f"[Supervisor] Sub-Swarm {sid} has no agents. Marking as completed.")
+                    continue
+                all_finished = True
+                for aid in agent_ids:
+                    agent_state = all_agents.get(aid)
+                    if agent_state:
+                        if agent_state.get("status") not in ["completed", "dead"]:
+                            all_finished = False
+                            break
+                    else:
+                        all_finished = False
+                        break
+                if all_finished:
+                    s["status"] = "completed"
+                    updated = True
+                    print(f"[Supervisor] Sub-Swarm {sid} agents have completed. Marking Sub-Swarm as completed.")
+        if updated:
+            for sid, s in state.get("sub_swarms", {}).items():
+                if s.get("status") == "pending":
+                    deps = s.get("dependencies", [])
+                    all_deps_met = True
+                    for d in deps:
+                        dep_swarm = state["sub_swarms"].get(d)
+                        if not dep_swarm or dep_swarm.get("status") != "completed":
+                            all_deps_met = False
+                            break
+                    if all_deps_met:
+                        s["status"] = "active"
+                        print(f"[Supervisor] Sub-Swarm {sid} dependencies resolved. Activating Sub-Swarm.")
+            with open(orchestrator_file, 'w') as f:
+                json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
 def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0):
@@ -34,6 +108,39 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     print(f"  Initial Agents: {len(initial_agents)} | Deconfliction: {deconflict} | Interactive: {interactive}")
     print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s")
     print("="*60 + "\n")
+    
+    if not os.path.exists(orchestrator_file):
+        sub_swarms = {
+            "swarm_001": {
+                "id": "swarm_001",
+                "goal": "Run swarm",
+                "role": "Generalist Group",
+                "dependencies": [],
+                "status": "active",
+                "agent_ids": [a["agent_id"] for a in initial_agents]
+            }
+        }
+        state = {
+            "macro_goal": "Run task",
+            "sub_swarms": sub_swarms
+        }
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(orchestrator_file, 'w') as f:
+            json.dump(state, f, indent=2)
+    else:
+        try:
+            with open(orchestrator_file, 'r') as f:
+                state = json.load(f)
+            updated = False
+            for sid, s in state.get("sub_swarms", {}).items():
+                if not s.get("dependencies") and s.get("status") == "pending":
+                    s["status"] = "active"
+                    updated = True
+            if updated:
+                with open(orchestrator_file, 'w') as f:
+                    json.dump(state, f, indent=2)
+        except Exception:
+            pass
     
     # 1. Start the background Supervisor Monitor process
     print("[Supervisor] Launching Supervisor Monitor daemon...")
@@ -73,14 +180,16 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         print(f"[Supervisor] Launching Agent {agent_id} runner subprocess...")
         running_processes[agent_id] = subprocess.Popen(cmd)
 
-    # Launch initial agents
+
+    # Launch initial agents (only if their sub-swarm is active!)
     for idx, agent_info in enumerate(initial_agents):
         agent_id = agent_info["agent_id"]
         task_id = agent_info["task_id"]
         personality = agent_info.get("personality")
         goal = agent_info.get("goal")
         offset = f"offset_{idx}" if (deconflict or len(initial_agents) > 1) else None
-        launch_agent(agent_id, task_id, offset, personality, goal)
+        if is_agent_sub_swarm_active(agent_id):
+            launch_agent(agent_id, task_id, offset, personality, goal)
 
     try:
         # Dynamic monitoring loop
@@ -95,6 +204,31 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                 del running_processes[agent_id]
                 print(f"[Supervisor] Agent {agent_id} runner subprocess exited.")
                 
+            # Evaluate sub-swarm completions and transitions
+            evaluate_sub_swarm_completion()
+            
+            # Check if any initial agents should be launched now that their sub-swarm is active
+            for idx, agent_info in enumerate(initial_agents):
+                agent_id = agent_info["agent_id"]
+                if agent_id not in running_processes:
+                    if is_agent_sub_swarm_active(agent_id):
+                        state_path = os.path.join(STATE_DIR, "agents", f"agent_{agent_id}.json")
+                        already_finished = False
+                        if os.path.exists(state_path):
+                            try:
+                                with open(state_path, 'r') as f:
+                                    ag_data = json.load(f)
+                                if ag_data.get("status") in ["completed", "dead"]:
+                                    already_finished = True
+                            except Exception:
+                                pass
+                        if not already_finished:
+                            task_id = agent_info["task_id"]
+                            personality = agent_info.get("personality")
+                            goal = agent_info.get("goal")
+                            offset = f"offset_{idx}" if (deconflict or len(initial_agents) > 1) else None
+                            launch_agent(agent_id, task_id, offset, personality, goal)
+            
             # 2. Check `.proximity_swarm/agents` to find active agents that aren't running
             agents_dir = os.path.join(STATE_DIR, "agents")
             if os.path.exists(agents_dir):
@@ -109,8 +243,8 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                                     with open(filepath, 'r') as f:
                                         data = json.load(f)
                                     if data.get("status") in ["exploring", "syncing", "pending_termination"]:
-                                        # Launch runner for this agent
-                                        launch_agent(agent_id)
+                                        if is_agent_sub_swarm_active(agent_id):
+                                            launch_agent(agent_id)
                                 except Exception:
                                     pass
                 except Exception:

@@ -126,7 +126,7 @@ def is_ollama_running():
 
 
 class AgentRunner:
-    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None):
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None, sub_swarm_id=None):
         self.agent_id = agent_id
         self.interactive = interactive
         self.step_delay = step_delay
@@ -136,6 +136,7 @@ class AgentRunner:
         self.ollama_model = ollama_model
         self.personality = personality or "Generalist"
         self.custom_goal = goal
+        self.sub_swarm_id = sub_swarm_id
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
         self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
@@ -167,6 +168,12 @@ class AgentRunner:
             if "goal" not in state and self.custom_goal:
                 state["goal"] = self.custom_goal
                 needs_save = True
+            if "sub_swarm_id" not in state and self.sub_swarm_id:
+                state["sub_swarm_id"] = self.sub_swarm_id
+                needs_save = True
+            if "parent_ids" not in state:
+                state["parent_ids"] = [state.get("parent_id")] if state.get("parent_id") else []
+                needs_save = True
             if needs_save:
                 save_json(self.state_file, state)
             return state
@@ -188,6 +195,7 @@ class AgentRunner:
         state = {
             "id": self.agent_id,
             "parent_id": None,
+            "parent_ids": [],
             "goal": self.custom_goal or task["goal"],
             "personality": self.personality,
             "status": "exploring",
@@ -202,6 +210,8 @@ class AgentRunner:
             "steps_completed": 0,
             "task_id": self.task_id
         }
+        if self.sub_swarm_id:
+            state["sub_swarm_id"] = self.sub_swarm_id
         
         if self.offset_suffix:
             state["offset_suffix"] = self.offset_suffix
@@ -624,10 +634,32 @@ class AgentRunner:
             agent_a["status"] = "pending_termination"
             agent_b["status"] = "exploring"
             self.share_knowledge_files(agent_a["id"], agent_b["id"])
+            
+            # Dynamic Multi-Parent link: agent_b (survivor) inherits agent_a's parents!
+            b_parents = agent_b.get("parent_ids") or ([agent_b.get("parent_id")] if agent_b.get("parent_id") else [])
+            a_parents = agent_a.get("parent_ids") or ([agent_a.get("parent_id")] if agent_a.get("parent_id") else [])
+            for p in a_parents:
+                if p and p not in b_parents:
+                    b_parents.append(p)
+            agent_b["parent_ids"] = b_parents
+            if b_parents:
+                agent_b["parent_id"] = b_parents[0]
+                
         elif action == "kill_b":
             agent_a["status"] = "exploring"
             agent_b["status"] = "pending_termination"
             self.share_knowledge_files(agent_b["id"], agent_a["id"])
+            
+            # Dynamic Multi-Parent link: agent_a (survivor) inherits agent_b's parents!
+            a_parents = agent_a.get("parent_ids") or ([agent_a.get("parent_id")] if agent_a.get("parent_id") else [])
+            b_parents = agent_b.get("parent_ids") or ([agent_b.get("parent_id")] if agent_b.get("parent_id") else [])
+            for p in b_parents:
+                if p and p not in a_parents:
+                    a_parents.append(p)
+            agent_a["parent_ids"] = a_parents
+            if a_parents:
+                agent_a["parent_id"] = a_parents[0]
+                
         else:  # keep_both
             agent_a["status"] = "exploring"
             agent_b["status"] = "exploring"
@@ -688,6 +720,7 @@ def main():
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
     parser.add_argument("--personality", help="The personality/role assigned to this agent")
     parser.add_argument("--goal", help="The dedicated goal/subtask assigned to this agent")
+    parser.add_argument("--sub-swarm-id", help="The sub-swarm functional group ID this agent belongs to")
     args = parser.parse_args()
     
     runner = AgentRunner(
@@ -699,7 +732,8 @@ def main():
         llm_provider=args.llm_provider,
         ollama_model=args.ollama_model,
         personality=args.personality,
-        goal=args.goal
+        goal=args.goal,
+        sub_swarm_id=args.sub_swarm_id
     )
     
     print(f"Starting Agent {args.agent_id} runner...")

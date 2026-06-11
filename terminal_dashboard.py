@@ -939,6 +939,82 @@ def recommend_starting_agents(query):
     return []
 
 
+def decompose_macro_goal(query):
+    """Query Ollama to decompose a macro task into a dependency tree of 1-3 sub-swarms."""
+    if not is_ollama_running():
+        return {
+            "sub_swarms": [
+                {
+                    "id": "swarm_001",
+                    "goal": query,
+                    "role": "Generalist Group",
+                    "dependencies": []
+                }
+            ]
+        }
+        
+    prompt = (
+        f"You are the Swarm Architect. Analyze the following macro task query:\n"
+        f"Query: '{query}'\n\n"
+        f"Decompose this task into a dependency tree of 1 to 3 functional sub-swarms.\n"
+        f"For each sub-swarm, specify:\n"
+        f"- 'id': A unique identifier (e.g. 'swarm_001', 'swarm_002')\n"
+        f"- 'goal': The sub-goal focus of the sub-swarm\n"
+        f"- 'role': The role/personality category of the sub-swarm (e.g. 'Security Specialists')\n"
+        f"- 'dependencies': A list of sub-swarm IDs that must complete BEFORE this sub-swarm can start (e.g., ['swarm_001']).\n\n"
+        f"You MUST respond with a valid JSON object only. Do not include markdown code fences or explanations outside the JSON.\n"
+        f"Example output structure:\n"
+        f"{{\n"
+        f"  \"sub_swarms\": [\n"
+        f"    {{\n"
+        f"      \"id\": \"swarm_001\",\n"
+        f"      \"goal\": \"Implement JWT signature verification\",\n"
+        f"      \"role\": \"Security Specialists\",\n"
+        f"      \"dependencies\": []\n"
+        f"    }},\n"
+        f"    {{\n"
+        f"      \"id\": \"swarm_002\",\n"
+        f"      \"goal\": \"Write unit tests for signature validation\",\n"
+        f"      \"role\": \"QA Specialists\",\n"
+        f"      \"dependencies\": [\"swarm_001\"]\n"
+        f"    }}\n"
+        f"  ]\n"
+        f"}}\n"
+    )
+    
+    response_text = call_ollama(prompt)
+    if not response_text:
+        return {
+            "sub_swarms": [
+                {
+                    "id": "swarm_001",
+                    "goal": query,
+                    "role": "Generalist Group",
+                    "dependencies": []
+                }
+            ]
+        }
+        
+    try:
+        cleaned_json = extract_json(response_text)
+        data = json.loads(cleaned_json)
+        if "sub_swarms" in data:
+            return data
+    except Exception:
+        pass
+        
+    return {
+        "sub_swarms": [
+            {
+                "id": "swarm_001",
+                "goal": query,
+                "role": "Generalist Group",
+                "dependencies": []
+            }
+        ]
+    }
+
+
 def register_dynamic_task(task_id, goal, steps):
     if not os.path.exists(MOCK_TASKS_FILE):
         tasks_data = {"tasks": {}}
@@ -1399,17 +1475,57 @@ def main():
                 input()
                 continue
 
-            # Check if personalities should be recommended
+            # Decompose goal into sub-swarms first
+            orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+            os.makedirs(STATE_DIR, exist_ok=True)
+            
             initial_swarm = []
             if predefined_personalities:
-                initial_swarm = list(predefined_personalities)
+                for idx, entry in enumerate(predefined_personalities):
+                    initial_swarm.append({
+                        "role": entry["role"],
+                        "goal": entry["goal"] or user_input,
+                        "sub_swarm_id": "swarm_001"
+                    })
+                orchestrator_state = {
+                    "macro_goal": user_input,
+                    "sub_swarms": {
+                        "swarm_001": {
+                            "id": "swarm_001",
+                            "goal": user_input,
+                            "role": "Custom Swarm",
+                            "dependencies": [],
+                            "status": "pending",
+                            "agent_ids": []
+                        }
+                    }
+                }
+                save_json(orchestrator_file, orchestrator_state)
             else:
-                write_to_monitor_log(f"No custom agents defined. Querying Ollama for recommendations on task: '{user_input}'...", "INFO")
-                recs = recommend_starting_agents(user_input)
-                if recs:
-                    initial_swarm = recs
-                else:
-                    initial_swarm = [{"role": "Generalist", "goal": user_input}]
+                write_to_monitor_log(f"No custom agents defined. Decomposing task into sub-swarms for: '{user_input}'...", "INFO")
+                decomposition = decompose_macro_goal(user_input)
+                
+                sub_swarms_dict = {}
+                for s in decomposition["sub_swarms"]:
+                    sub_swarms_dict[s["id"]] = {
+                        "id": s["id"],
+                        "goal": s["goal"],
+                        "role": s["role"],
+                        "dependencies": s["dependencies"],
+                        "status": "pending",
+                        "agent_ids": []
+                    }
+                    initial_swarm.append({
+                        "role": s["role"],
+                        "goal": s["goal"],
+                        "sub_swarm_id": s["id"]
+                    })
+                    
+                orchestrator_state = {
+                    "macro_goal": user_input,
+                    "sub_swarms": sub_swarms_dict
+                }
+                save_json(orchestrator_file, orchestrator_state)
             
             # Enter Swarm Designer Mode to review/modify roles/goals
             final_swarm = run_swarm_designer(initial_swarm, user_input, layout)
@@ -1426,6 +1542,7 @@ def main():
                 agent_role = entry.get("role", "Generalist")
                 agent_goal = entry.get("goal") or user_input
                 agent_id = f"{idx+1:03d}"
+                agent_sub_swarm = entry.get("sub_swarm_id", "swarm_001")
                 
                 write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
                 steps = generate_task_steps(agent_goal)
@@ -1447,8 +1564,20 @@ def main():
                     "agent_id": agent_id,
                     "task_id": task_id,
                     "personality": agent_role,
-                    "goal": agent_goal
+                    "goal": agent_goal,
+                    "sub_swarm_id": agent_sub_swarm
                 })
+                
+            # Update orchestrator.json with final assigned agent IDs
+            orchestrator_state = load_json(orchestrator_file)
+            if orchestrator_state:
+                for sid in orchestrator_state["sub_swarms"]:
+                    orchestrator_state["sub_swarms"][sid]["agent_ids"] = []
+                for item in agents_config:
+                    sid = item["sub_swarm_id"]
+                    if sid in orchestrator_state["sub_swarms"]:
+                        orchestrator_state["sub_swarms"][sid]["agent_ids"].append(item["agent_id"])
+                save_json(orchestrator_file, orchestrator_state)
                 
             # Clear predefined personalities for next run
             predefined_personalities.clear()

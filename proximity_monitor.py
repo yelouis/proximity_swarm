@@ -196,6 +196,23 @@ def handle_spawn_requests(agents):
             # Inherit offset suffix if present
             if agent.get("offset_suffix"):
                 child_agent["offset_suffix"] = agent["offset_suffix"]
+                
+            # Inherit sub_swarm_id and register in orchestrator
+            if agent.get("sub_swarm_id"):
+                child_agent["sub_swarm_id"] = agent["sub_swarm_id"]
+                try:
+                    orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+                    if os.path.exists(orchestrator_file):
+                        with open(orchestrator_file, 'r') as f_orc:
+                            state = json.load(f_orc)
+                        sid = agent["sub_swarm_id"]
+                        if sid in state.get("sub_swarms", {}):
+                            if child_id not in state["sub_swarms"][sid]["agent_ids"]:
+                                state["sub_swarms"][sid]["agent_ids"].append(child_id)
+                                with open(orchestrator_file, 'w') as f_orc:
+                                    json.dump(state, f_orc, indent=2)
+                except Exception:
+                    pass
             
             child_ws = os.path.join(WORKSPACES_DIR, f"agent_{child_id}")
             os.makedirs(child_ws, exist_ok=True)
@@ -298,13 +315,22 @@ def run_cascading_kills():
         for child_id in children:
             child = all_agents.get(child_id)
             if child and child["status"] != "dead":
-                child["status"] = "dead"
-                save_agent_state(child)
-                logging.warning(
-                    f"[CASCADING KILL] Supervisor killed child Agent {child_id} "
-                    f"recursively because parent Agent {parent_id} is dead."
-                )
-                cascade(child_id)  # recurse
+                # Check if all parents of this child are dead
+                child_parents = child.get("parent_ids") or ([child.get("parent_id")] if child.get("parent_id") else [])
+                all_parents_dead = True
+                for pid in child_parents:
+                    p_state = all_agents.get(pid)
+                    if p_state and p_state.get("status") != "dead":
+                        all_parents_dead = False
+                        break
+                if all_parents_dead:
+                    child["status"] = "dead"
+                    save_agent_state(child)
+                    logging.warning(
+                        f"[CASCADING KILL] Supervisor killed child Agent {child_id} "
+                        f"recursively because all of its parents are dead."
+                    )
+                    cascade(child_id)  # recurse
                 
     # Run cascade check starting from all dead agents
     for agent_id, agent in list(all_agents.items()):
