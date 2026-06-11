@@ -196,4 +196,17 @@ To scale complex task decomposition and coordinate functional groups, the archit
 - **Dynamic Multi-Parent Links**: When a cross-swarm takeover occurs, the surviving agent is dynamically linked as a child to the parents of both sub-swarms. The supervisor updates the dependency tree so that both parent branches await the surviving agent's completion.
 - **Dependency-Gated Lifecycle**: Sub-swarms are initialized dynamically and are marked complete only when all of their active leaf agents finish execution and the consensus-gating framework approves the unified hierarchical synthesis of their deliverables.
 
+---
+
+## 11. Dynamic Proximity Weighting (Adaptive Focus)
+
+To optimize resources and adjust spatial sensitivity based on the state of execution, the framework utilizes an adaptive weighting system:
+
+- **LLM-Based Phase Classification**: At the start of each execution step, the Proximity Monitor queries local Ollama to classify the active step into one of four task phases: `Planning`, `Coding`, `Debugging`, or `Documentation`.
+- **Predefined Weights Mapping**: The classified phase dynamically updates the factor weights ($W_{goal}$, $W_{files}$, $W_{tools}$) used in the proximity distance function:
+  - **Planning**: Boosts intent alignment ($W_{goal} = 0.8$, $W_{files} = 0.1$, $W_{tools} = 0.1$).
+  - **Coding**: Balances semantics and resource changes ($W_{goal} = 0.4$, $W_{files} = 0.4$, $W_{tools} = 0.2$).
+  - **Debugging**: Focuses heavily on resource collisions ($W_{goal} = 0.1$, $W_{files} = 0.6$, $W_{tools} = 0.3$).
+  - **Documentation**: Prioritizes goals and outputs ($W_{goal} = 0.6$, $W_{files} = 0.3$, $W_{tools} = 0.1$).
+
 
