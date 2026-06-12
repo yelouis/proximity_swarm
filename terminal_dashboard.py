@@ -378,6 +378,15 @@ def load_json(filepath):
     except Exception:
         return None
 
+def save_json(filepath, data):
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 
 def purge_artifacts(target=None):
     """Wipes the selected/all .proximity_swarm state artifacts and optionally dynamic tasks."""
