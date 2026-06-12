@@ -1626,7 +1626,8 @@ def main():
                 save_json(orchestrator_file, orchestrator_state)
             else:
                 write_to_monitor_log(f"No custom agents defined. Decomposing task into sub-swarms for: '{user_input}'...", "INFO")
-                decomposition = decompose_macro_goal(user_input)
+                with console.status("[bold yellow]Decomposing macro task into sub-swarms via Ollama...", spinner="dots"):
+                    decomposition = decompose_macro_goal(user_input)
                 
                 sub_swarms_dict = {}
                 for s in decomposition["sub_swarms"]:
@@ -1661,35 +1662,50 @@ def main():
             agents_config = []
             now_ts = int(time.time())
             
-            for idx, entry in enumerate(final_swarm):
-                agent_role = entry.get("role", "Generalist")
-                agent_goal = entry.get("goal") or user_input
-                agent_id = f"{idx+1:03d}"
-                agent_sub_swarm = entry.get("sub_swarm_id", "swarm_001")
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=console
+            ) as progress:
+                task_id_progress = progress.add_task("[yellow]Decomposing agent goals...", total=len(final_swarm))
                 
-                write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
-                steps = generate_task_steps(agent_goal)
-                if not steps:
-                    steps = [
-                        {
-                            "step_id": 1,
-                            "name": "General Execution",
-                            "description": f"Perform tasks for: {agent_goal}",
-                            "touched_files": [f"src/agent_{agent_id}_output.md"],
-                            "tools": ["edit_file"]
-                        }
-                    ]
-                
-                task_id = f"task_dynamic_{now_ts}_{idx}"
-                register_dynamic_task(task_id, agent_goal, steps)
-                
-                agents_config.append({
-                    "agent_id": agent_id,
-                    "task_id": task_id,
-                    "personality": agent_role,
-                    "goal": agent_goal,
-                    "sub_swarm_id": agent_sub_swarm
-                })
+                for idx, entry in enumerate(final_swarm):
+                    agent_role = entry.get("role", "Generalist")
+                    agent_goal = entry.get("goal") or user_input
+                    agent_id = f"{idx+1:03d}"
+                    agent_sub_swarm = entry.get("sub_swarm_id", "swarm_001")
+                    
+                    progress.update(task_id_progress, description=f"[yellow]Agent {agent_id} ({agent_role}): Decomposing goal...")
+                    write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
+                    
+                    steps = generate_task_steps(agent_goal)
+                    if not steps:
+                        steps = [
+                            {
+                                "step_id": 1,
+                                "name": "General Execution",
+                                "description": f"Perform tasks for: {agent_goal}",
+                                "touched_files": [f"src/agent_{agent_id}_output.md"],
+                                "tools": ["edit_file"]
+                            }
+                        ]
+                    
+                    task_id = f"task_dynamic_{now_ts}_{idx}"
+                    register_dynamic_task(task_id, agent_goal, steps)
+                    
+                    agents_config.append({
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "personality": agent_role,
+                        "goal": agent_goal,
+                        "sub_swarm_id": agent_sub_swarm
+                    })
+                    
+                    progress.advance(task_id_progress)
                 
             # Update orchestrator.json with final assigned agent IDs
             orchestrator_state = load_json(orchestrator_file)
