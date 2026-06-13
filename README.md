@@ -78,9 +78,21 @@ python3 -m unittest discover -s tests
 
 ---
 
+## 🌀 Ralph Wiggum Loop Integration (Concept)
+
+The system supports architectural patterns inspired by the **Ralph Wiggum Loop** ("persistence over perfection") to enable resilient local agent execution:
+
+* **Self-Healing Retries**: Agents wrapped in an inner evaluation loop. If a step's verification tool (e.g. `pytest`, `gcc`) fails, the runner queries the LLM again with the compiler traceback to self-correct the code.
+* **Context Resetting**: Wipes conversational memory on retry iterations, presenting the LLM only with the target code and compiler error to prevent context dilution/confusion.
+* **Test-Driven Progress**: Ties agent progress bar increments strictly to passing compilation/verification tests.
+
+---
+
 ## Roadmap
 
 1. **Phase 1: Local Simulation & Mock Agents:** Simulate agent collisions, negotiations, and status transitions in a local database sandbox.
 2. **Phase 2: Live Shell Agents:** Wrap agents with file/terminal tools and add tombstone lessons persistence.
 3. **Phase 3: Web Visualization Dashboard:** Build a dynamic visual grid/network visualization of agents interacting in trajectory space.
+4. **Phase 4: Ralph Wiggum Loop Integration:** Implement the self-healing retry loop, context resetting, and test-driven progress gates across the swarm.
+
 

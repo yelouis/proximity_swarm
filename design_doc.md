@@ -219,4 +219,15 @@ To debug and trace the non-deterministic trajectories of agents, the framework i
 - **Mermaid Markdown Flowcharts**: Translates the active database timeline into a structured Markdown file containing a Mermaid syntax diagram.
 - **TUI Integration**: Introduces the `/trace [agent_id]` command which dynamically generates and displays the agent's causal lineage flow directly inside the TUI center panel. Allows developers to trace decision histories and find root-cause errors visually.
 
+---
+
+## 13. Ralph Wiggum Loop Integration Concepts (Self-Healing & Persistence)
+
+To introduce high-reliability self-healing execution at the step level, the system is designed to incorporate core principles from the **Ralph Wiggum Loop** methodology ("persistence over perfection"):
+
+- **Self-Healing Inner Loop**: When an agent executes a step, the runner does not simply write the output file and proceed. If verification tools (e.g., `pytest`, `gcc`, or custom linters) are specified for the step, the runner executes them locally. If a failure (non-zero exit code) is encountered, the runner enters a self-healing iteration loop, feeding the failure back to the LLM to patch the file, repeating up to a maximum number of attempts before declaring a step blocker/tombstone.
+- **Context Window Resetting**: During the self-healing retry iterations, the chat message history is reset. Instead of accumulating previous failed attempts (which dilutes the local LLM's instruction-following quality), the runner initiates a clean context window containing only the target goals, the current file contents, and the raw compiler/test traceback error.
+- **Test-Driven Progress Gates**: The agent's progress bar (e.g. 33% -> 66%) is strictly tied to successful step verification. A step is not counted as completed, and progress is not advanced, until the associated verification tests return exit code 0, ensuring TUI progress indicators reflect concrete math/compilation milestones.
+
+
 
