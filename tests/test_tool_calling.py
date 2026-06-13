@@ -250,6 +250,93 @@ class TestOllamaToolCalling(unittest.TestCase):
             content = f.read()
         self.assertEqual(content, "Fallback raw content generation succeeded.")
 
+    @unittest.mock.patch("urllib.request.urlopen")
+    def test_call_ollama_chat_with_spawn_tool_call(self, mock_urlopen):
+        # We mock Ollama returning a tool call to 'spawn_agent'
+        response_1 = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "spawn_agent",
+                            "arguments": {
+                                "goal": "Write subagent goal tests",
+                                "initial_files": ["tests/test_sub.py"]
+                            }
+                        }
+                    }
+                ]
+            }
+        }).encode("utf-8")
+        
+        response_2 = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": "I have successfully spawned the child agent to work on the tests."
+            }
+        }).encode("utf-8")
+
+        mock_resp_1 = unittest.mock.MagicMock()
+        mock_resp_1.read.return_value = response_1
+        
+        mock_resp_2 = unittest.mock.MagicMock()
+        mock_resp_2.read.return_value = response_2
+        
+        mock_urlopen.return_value.__enter__.side_effect = [mock_resp_1, mock_resp_2]
+
+        agent_id = "008"
+        agent_state = {
+            "id": agent_id,
+            "task_id": "task_008",
+            "goal": "Primary goal",
+            "status": "exploring",
+            "progress": 0,
+            "steps_completed": 0,
+            "touched_files": [],
+            "tools_used": [],
+            "current_step": {
+                "step_id": 1,
+                "name": "Write answer",
+                "description": "Output response into file"
+            }
+        }
+        state_file = os.path.join(agent_runner.AGENTS_DIR, f"agent_{agent_id}.json")
+        with open(state_file, 'w') as f:
+            json.dump(agent_state, f)
+
+        runner = AgentRunner(
+            agent_id=agent_id,
+            goal="Primary goal",
+            llm_provider="ollama",
+            step_delay=0.01
+        )
+        
+        local_registry = {
+            "spawn_agent": lambda goal, initial_files: runner.request_spawn_agent(goal, initial_files)
+        }
+
+        messages = [{"role": "user", "content": "Spawn a test agent to help write tests"}]
+        res = call_ollama_chat_with_tools(
+            messages=messages, 
+            tools=[agent_runner.SPAWN_AGENT_TOOL], 
+            model="gemma4:latest",
+            registry=local_registry
+        )
+        
+        self.assertEqual(res, "I have successfully spawned the child agent to work on the tests.")
+        
+        # Verify that spawn_request block was written to state file on disk
+        state_file = os.path.join(agent_runner.AGENTS_DIR, f"agent_{agent_id}.json")
+        self.assertTrue(os.path.exists(state_file))
+        with open(state_file, 'r') as f:
+            saved_state = json.load(f)
+            
+        self.assertIn("spawn_request", saved_state)
+        self.assertEqual(saved_state["spawn_request"]["goal"], "Write subagent goal tests")
+        self.assertEqual(saved_state["spawn_request"]["initial_files"], ["tests/test_sub.py"])
+
 
 if __name__ == "__main__":
     unittest.main()

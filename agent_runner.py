@@ -142,6 +142,30 @@ SEARCH_WEB_TOOL = {
     }
 }
 
+# Ollama Spawn Tool schema representation
+SPAWN_AGENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "spawn_agent",
+        "description": "Spawns a specialized sub-agent to work in parallel on a sub-task when handling a complex multi-stage goal.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "A clear, narrow task goal for the sub-agent."
+                },
+                "initial_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of relative file paths the sub-agent should initially edit or create."
+                }
+            },
+            "required": ["goal", "initial_files"]
+        }
+    }
+}
+
 # Simple registry mapping tool names to actual execution functions
 TOOL_REGISTRY = {}
 if web_search:
@@ -153,7 +177,7 @@ else:
     ])
 
 
-def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest"):
+def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest", registry=None):
     """
     Call Ollama Chat API with tool-use capability.
     Executes tools locally if requested by the LLM, and submits results back
@@ -163,6 +187,7 @@ def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest"):
     headers = {"Content-Type": "application/json"}
     
     current_messages = list(messages)
+    active_registry = registry if registry is not None else TOOL_REGISTRY
     
     for iteration in range(5):
         body = {
@@ -200,18 +225,30 @@ def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest"):
                     print(f"  [Tool Call] Model requested: {func_name} with args: {func_args}")
                     
                     # Execute tool
-                    if func_name in TOOL_REGISTRY:
+                    if func_name in active_registry:
                         try:
-                            # Extract search query
-                            query = func_args.get("query")
-                            if not query:
-                                # Sometimes models output a string argument or named parameter differently
-                                if isinstance(func_args, str):
-                                    query = func_args
+                            # Try generic kwargs invocation
+                            if isinstance(func_args, dict):
+                                result = active_registry[func_name](**func_args)
+                            else:
+                                result = active_registry[func_name](func_args)
+                        except TypeError:
+                            try:
+                                # Fallback logic for search_web if parameters are not dict kwargs
+                                if func_name == "search_web":
+                                    query = func_args.get("query") if isinstance(func_args, dict) else func_args
+                                    if not query:
+                                        if isinstance(func_args, str):
+                                            query = func_args
+                                        elif isinstance(func_args, dict) and func_args:
+                                            query = str(list(func_args.values())[0])
+                                        else:
+                                            query = ""
+                                    result = active_registry[func_name](query)
                                 else:
-                                    query = str(list(func_args.values())[0]) if func_args else ""
-                            
-                            result = TOOL_REGISTRY[func_name](query)
+                                    raise
+                            except Exception as ex:
+                                result = json.dumps({"error": f"Tool execution failed: {ex}"})
                         except Exception as ex:
                             result = json.dumps({"error": f"Tool execution failed: {ex}"})
                     else:
@@ -343,6 +380,20 @@ class AgentRunner:
         save_json(self.state_file, state)
         print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}' (Offset: {self.offset_suffix}) with role '{self.personality}' and goal '{state['goal']}'.")
         return state
+
+    def request_spawn_agent(self, goal, initial_files):
+        """Writes a spawn_request block to the agent's state file for supervisor monitoring."""
+        self.state = load_json(self.state_file) or self.state
+        self.state["spawn_request"] = {
+            "goal": goal,
+            "initial_files": list(initial_files)
+        }
+        save_json(self.state_file, self.state)
+        print(f"  [Spawn Request] Registered request to spawn child agent with goal: '{goal}'")
+        return json.dumps({
+            "status": "success",
+            "message": f"Spawn request registered for goal: '{goal}'. The supervisor will launch the child agent shortly."
+        })
 
     def load_historical_context(self):
         """Loads historical context from episodic memory matching the goal."""
@@ -573,12 +624,16 @@ class AgentRunner:
                 
                 res_content = None
                 try:
-                    # Attempt native Ollama tool-calling loop
+                    # Attempt native Ollama tool-calling loop with search and spawn tools
                     system_prompt = (
                         f"You are Agent {self.agent_id} with the role/personality: '{self.state.get('personality', 'Generalist')}' working on the task: '{self.state['goal']}'.\n"
                         f"You must perform your work in character based on your assigned role/personality. "
                         f"Do not include any conversational dialogue, chat introduction, or explaining text outside the file content. "
-                        f"Output ONLY the raw content of the file. No markdown code fence wrapper or conversational noise."
+                        f"Output ONLY the raw content of the file. No markdown code fence wrapper or conversational noise.\n\n"
+                        f"SPAWNING ABILITY: If you are working on a complex, multi-stage goal and realize that a sub-task "
+                        f"can be executed independently in parallel (e.g. building a helper script, testing a sub-module, or parsing config), "
+                        f"you can call the `spawn_agent` tool to request the supervisor to spawn a specialized sub-agent. "
+                        f"Do not block on the sub-agent; spawn it and continue with your main tasks."
                     )
                     user_prompt = ""
                     if getattr(self, "historical_context", None):
@@ -594,11 +649,18 @@ class AgentRunner:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ]
-                    print(f"  [Tool Use Check] Querying Ollama with search tool capability...")
+                    
+                    local_registry = {
+                        "search_web": lambda query: json.dumps(web_search.search_web(query) if web_search else []),
+                        "spawn_agent": lambda goal, initial_files: self.request_spawn_agent(goal, initial_files)
+                    }
+                    
+                    print(f"  [Tool Use Check] Querying Ollama with search and spawn tool capabilities...")
                     res_content = call_ollama_chat_with_tools(
                         messages=messages,
-                        tools=[SEARCH_WEB_TOOL],
-                        model=self.ollama_model
+                        tools=[SEARCH_WEB_TOOL, SPAWN_AGENT_TOOL],
+                        model=self.ollama_model,
+                        registry=local_registry
                     )
                 except Exception as tool_ex:
                     print(f"  [Tool Use Bypass] Ollama tool-calling failed/unsupported: {tool_ex}. Falling back to raw generate.")
