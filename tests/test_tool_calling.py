@@ -96,6 +96,13 @@ class TestOllamaToolCalling(unittest.TestCase):
         agent_runner.MOCK_TASKS_FILE = os.path.join(self.test_dir, "mock_tasks.json")
         agent_runner.TOMBSTONES_FILE = os.path.join(self.test_dir, "tombstones.json")
         
+        import memory_store
+        self.old_db_dir = memory_store.DB_DIR
+        self.old_db_path = memory_store.DB_PATH
+        memory_store.DB_DIR = self.test_dir
+        memory_store.DB_PATH = os.path.join(self.test_dir, "test_memory.db")
+        memory_store.init_db()
+        
         os.makedirs(agent_runner.AGENTS_DIR, exist_ok=True)
         os.makedirs(agent_runner.WORKSPACES_DIR, exist_ok=True)
         
@@ -110,6 +117,11 @@ class TestOllamaToolCalling(unittest.TestCase):
         agent_runner.WORKSPACES_DIR = self.old_workspaces_dir
         agent_runner.MOCK_TASKS_FILE = self.old_mock_tasks
         agent_runner.TOMBSTONES_FILE = self.old_tombstones
+        
+        import memory_store
+        memory_store.DB_DIR = self.old_db_dir
+        memory_store.DB_PATH = self.old_db_path
+        
         shutil.rmtree(self.test_dir)
 
     @unittest.mock.patch("urllib.request.urlopen")

@@ -19,7 +19,8 @@ In addition to Conway's Game of Life dynamics, Proximity Swarm acts as a **Git-l
   - **Overpopulation (Redundancy):** Slower duplicate agents self-terminate.
   - **Underpopulation (Isolation):** Isolated agents spawn sub-agents to explore parallel paths.
   - **Symbiosis (Converse & Learn):** Proximate agents share findings to accelerate tasks or warn of dead-ends.
-
+- **Novelty Spawning Gating:** Every 5 steps, agents evaluate semantic isolation (TF-IDF similarity < 0.35) and historical run novelty (SQLite query similarity < 0.50) to trigger specialized child helper spawns.
+- **Active Swarm Budget & Leaf Pruning:** Limits concurrent active agents (default `--budget 4`). If exceeded, the TUI displays LLM-ranked (or heuristic-sorted fallback) leaf agents for manual pruning.
 - **Episodic Memory (Institutional Learning):** Completed or failed agent runs are stored as episodes in a local SQLite database (`.proximity_swarm/memory.db`). Active agents query these episodes semantically at startup to preload past files and avoid repeating errors.
 
 ## Getting Started & How to Run
@@ -52,6 +53,8 @@ python3 cli.py
 *   **In-TUI Commands**:
     *   `/help` - Show all dashboard CLI commands and targets.
     *   `/memory` - Display past recorded run episodes, including goal, role, status, and agent self-reflections.
+    *   `/budget <cap>` - Dynamically adjust the active swarm budget cap (transient).
+    *   `/prune <agent_id>` - Terminate an active leaf agent (safety restricted) and register a pruned tombstone blocker explanation.
     *   `/clean [target]` - Granularly purge storage artifacts (e.g., `/clean logs`, `/clean workspaces`, `/clean tombstones`, `/clean memory`, or specific filenames like `/clean quicksort.py`).
     *   `/exit` - Exit the dashboard.
 

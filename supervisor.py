@@ -96,7 +96,7 @@ def evaluate_sub_swarm_completion():
         print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
-def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0):
+def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=4):
     """
     Launches a swarm dynamically, starting with initial_agents (list of dicts containing agent_id and task_id).
     Dynamically spawns runners for any children created during execution.
@@ -106,7 +106,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     print("\n" + "="*60)
     print(f"  STARTING PROXIMITY SWARM RUN")
     print(f"  Initial Agents: {len(initial_agents)} | Deconfliction: {deconflict} | Interactive: {interactive}")
-    print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s")
+    print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s | Budget: {budget}")
     print("="*60 + "\n")
     
     if not os.path.exists(orchestrator_file):
@@ -147,6 +147,10 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     monitor_cmd = [sys.executable, "proximity_monitor.py", "--interval", "0.5"]
     if ollama_model:
         monitor_cmd.extend(["--ollama-model", ollama_model])
+    if interactive:
+        monitor_cmd.append("--interactive")
+    if budget:
+        monitor_cmd.extend(["--budget", str(budget)])
     monitor_proc = subprocess.Popen(
         monitor_cmd, 
         stdout=subprocess.DEVNULL, 
@@ -293,7 +297,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         print("[Supervisor] Cleaned up child processes.")
 
 
-def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0):
+def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=4):
     """
     Launches two agents assigned to the same task (redundancy test).
     If deconflict is enabled, applies goal deconfliction offsets to their files.
@@ -308,7 +312,8 @@ def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, o
         interactive=interactive,
         llm_provider=llm_provider,
         ollama_model=ollama_model,
-        step_delay=step_delay
+        step_delay=step_delay,
+        budget=budget
     )
 
 
@@ -323,6 +328,7 @@ def main():
     parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
     parser.add_argument("--personalities", help="Comma-separated list of agent personalities/roles to initialize")
     parser.add_argument("--agents-config", help="JSON string representing starting agent configurations")
+    parser.add_argument("--budget", type=int, default=4, help="Maximum number of active agents in the swarm")
     args = parser.parse_args()
     
     if args.run_redundant:
@@ -331,7 +337,8 @@ def main():
             deconflict=args.deconflict,
             llm_provider=args.llm_provider,
             ollama_model=args.ollama_model,
-            step_delay=args.step_delay
+            step_delay=args.step_delay,
+            budget=args.budget
         )
     elif args.agents_config:
         try:
@@ -346,7 +353,8 @@ def main():
             interactive=args.interactive,
             llm_provider=args.llm_provider,
             ollama_model=args.ollama_model,
-            step_delay=args.step_delay
+            step_delay=args.step_delay,
+            budget=args.budget
         )
     elif args.task_id:
         personalities = []
@@ -367,7 +375,8 @@ def main():
             interactive=args.interactive,
             llm_provider=args.llm_provider,
             ollama_model=args.ollama_model,
-            step_delay=args.step_delay
+            step_delay=args.step_delay,
+            budget=args.budget
         )
     else:
         parser.print_help()

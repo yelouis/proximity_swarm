@@ -160,67 +160,124 @@
         }
       ]
     },
-    "task_dynamic_1781152558_0": {
-      "id": "task_dynamic_1781152558_0",
-      "goal": "Identify and curate high-relevance GitHub repositories and initial swarm concepts related to LLM applications.",
+    "task_dynamic_1781312942_0": {
+      "id": "task_dynamic_1781312942_0",
+      "goal": "Precisely define the Collatz function and the conjecture's parameters.",
       "steps": [
         {
           "step_id": 1,
-          "name": "Repo Scouting and Initial Concept Gathering",
-          "description": "Execute targeted searches across GitHub (using search APIs/simulated web scraping) for repositories related to 'LLM applications', 'RAG systems', 'Agentic workflows', and specific popular LLMs (e.g., LangChain, LlamaIndex). The goal is to identify 5-7 highly relevant repos that showcase practical implementations and community usage. Simultaneously, gather initial high-level concepts/ideas for how a multi-agent swarm could interact with these technologies.",
-          "touched_files": [],
+          "name": "Research Collatz Function Definition",
+          "description": "Identify and rigorously define the mathematical function used in the Collatz sequence. This includes defining the specific rule (based on parity) for integer inputs ($n$ is even or $n$ is odd). The definition must be precise enough to serve as the basis for both mathematical description and implementation.",
+          "touched_files": [
+            "research/collatz_definition.md"
+          ],
           "tools": [
-            "web_search",
-            "read_file"
+            "search",
+            "edit_file"
           ]
         },
         {
           "step_id": 2,
-          "name": "Repository Analysis and Filtering",
-          "description": "For the identified repositories, perform detailed analysis. This involves examining READMEs, star counts, last commit dates, dependency graphs, and open issues to assess quality, activity, and maturity. Categorize these repos by their core functionality (e.g., Vector DB Integration, UI Frameworks, Orchestration Layer). Filter out outdated or low-quality sources, curating a definitive list of 3-5 top-tier GitHub links.",
-          "touched_files": [],
+          "name": "Define Conjecture Parameters and Scope",
+          "description": "Research the conjecture itself (the Collatz conjecture). This step requires defining the parameters involved (e.g., starting integer $n$, termination condition, cycle length). The output must clearly state what the conjecture claims and under what conditions it applies.",
+          "touched_files": [
+            "research/collatz_conjecture.md",
+            "draft/task_summary.txt"
+          ],
           "tools": [
-            "analyze_codebase",
-            "read_file"
+            "search",
+            "edit_file"
           ]
         },
         {
           "step_id": 3,
-          "name": "Swarm Concept Refinement and Curation",
-          "description": "Based on the high-relevance repositories (from Step 2), define and formalize several distinct 'swarm concepts'. These concepts should describe how multiple specialized AI agents could collaborate using the technologies found in those repos. Each concept must include a clear goal, required components (e.g., Memory Agent, Planner Agent, Execution Agent), and potential interactions. Structure these curated ideas into an organized markdown document.",
+          "name": "Synthesize and Finalize Definition Document",
+          "description": "Consolidate the findings from steps 1 and 2. Create a comprehensive document that mathematically defines the function $C(n)$ and precisely states the conjecture's claim (that every positive integer eventually reaches 1). Ensure all parts are cohesive and ready for final review.",
           "touched_files": [
-            "output/swarm_concepts.md"
+            "output/collatz_definition_summary.md"
           ],
           "tools": [
             "edit_file",
-            "write_summary"
+            "review_document"
           ]
         }
       ]
     },
-    "task_dynamic_1781152558_1": {
-      "id": "task_dynamic_1781152558_1",
-      "goal": "Analyze the findings, group similar ideas, and synthesize actionable architectural blueprints from multiple sources.",
+    "task_dynamic_1781312942_1": {
+      "id": "task_dynamic_1781312942_1",
+      "goal": "Develop and execute large-scale computational tests to verify the conjecture for vast ranges of integers (initial evidence).",
       "steps": [
         {
           "step_id": 1,
-          "name": "Information Extraction and Categorization",
-          "description": "The team must first consume all disparate sources (documents, reports, findings) to extract key architectural ideas, concepts, and technical suggestions. These extracted pieces of information must then be categorized into thematic groups based on function, layer, or domain (e.g., Data Flow Management, Authentication/Security, Frontend State Handling, Backend Microservice Design).",
+          "name": "Design Test Range and Architecture",
+          "description": "Analyze the conjecture to determine necessary computational ranges (e.g., prime number density, size limits). Design a modular testing architecture capable of handling large-scale computation across diverse integer input types. Create initial test scaffolds and performance benchmarks.",
           "touched_files": [
-            "data/raw_inputs/",
-            "scratchpad/extracted_concepts.json"
+            "config/test_ranges.yaml",
+            "src/test_runner.py"
           ],
           "tools": [
-            "edit_file"
+            "edit_file",
+            "python_lint"
           ]
         },
         {
           "step_id": 2,
-          "name": "Pattern Identification and Synthesis Drafting",
-          "description": "Next, the categorized concepts must be analyzed for common patterns, overlaps, conflicts, and dependencies. The agents will synthesize these grouped ideas into preliminary architectural components or modules, drafting initial blueprints for how different parts should interact (e.g., identifying a centralized messaging bus pattern, defining required API contracts). This stage results in structured component descriptions.",
+          "name": "Implement Computation Modules and Optimizations",
+          "description": "Develop optimized computational modules (e.g., primality testing algorithms, number theory functions) required to verify the conjecture for large inputs. Implement necessary optimizations (e.g., vectorized operations, parallel processing via multiprocessing/threading) to maximize throughput across the defined ranges.",
           "touched_files": [
-            "scratchpad/grouped_patterns.md",
-            "src/architectural_blueprints_draft.py"
+            "src/computation_core.py",
+            "tests/test_performance.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Execute Large-Scale Verification Test Run",
+          "description": "Execute the integrated test suite using optimized parameters and computational modules across the entire specified range of integers. Monitor resource utilization (CPU/Memory) to ensure stability. Systematically collect results, potential counterexamples, or confirming evidence for each tested segment.",
+          "touched_files": [
+            "output/verification_log_summary.json"
+          ],
+          "tools": [
+            "run_python",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Analyze Results and Conclude Evidence Status",
+          "description": "Process the results collected in Step 3 (output/verification_log_summary.json). Analyze patterns to summarize the empirical evidence gathered regarding the conjecture's validity across various ranges of integers. Write a detailed report outlining findings, any observed exceptions, and concluding status.",
+          "touched_files": [
+            "src/answer.md",
+            "output/conclusion_report.pdf"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ]
+    },
+    "task_dynamic_1781312942_2": {
+      "id": "task_dynamic_1781312942_2",
+      "goal": "Analyze mathematical properties and attempt to derive a formal proof or counterexample using advanced number theory.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Initial Hypothesis Formulation and Literature Review",
+          "description": "Thoroughly review the problem statement to identify key mathematical definitions, assumptions, and theorems required. Formulate preliminary hypotheses regarding potential proofs or counterexamples. Conduct a simulated literature search (mental check) for similar problems in advanced number theory (e.g., analytic number theory, algebraic number theory) to establish a theoretical foundation.",
+          "touched_files": [
+            "analysis/draft_hypotheses.md"
+          ],
+          "tools": []
+        },
+        {
+          "step_id": 2,
+          "name": "Derivation Attempt and Proof Structure Outline",
+          "description": "Attempt the derivation of a formal proof or counterexample based on the formulated hypotheses. This involves breaking down the problem into smaller, manageable sub-claims ( lemmas). The output should be a structured outline (e.g., in LaTeX or Markdown) detailing the steps, required machinery (identities, functions), and points where logical jumps or gaps exist.",
+          "touched_files": [
+            "proof/derivation_outline.md"
           ],
           "tools": [
             "edit_file"
@@ -228,10 +285,10 @@
         },
         {
           "step_id": 3,
-          "name": "Final Blueprint Assembly and Review",
-          "description": "The final step involves formalizing the drafted patterns into cohesive, actionable architectural blueprints. This includes creating high-level diagrams (textual or pseudocode), defining technology stacks for each component, outlining implementation steps, and generating a comprehensive summary document that serves as the finalized blueprint.",
+          "name": "Rigorous Verification and Finalization",
+          "description": "Execute the core proof or counterexample development plan outlined in Step 2. Systematically verify every logical step using established number theory principles (e.g., congruences, inequalities, generating functions). Write the complete, formal argument\u2014either a rigorous proof or a concrete counterexample with verification\u2014in preparation for presentation.",
           "touched_files": [
-            "output/final_blueprint.md"
+            "proof/final_result.md"
           ],
           "tools": [
             "edit_file"

@@ -246,6 +246,7 @@ def load_active_agents():
 
 def save_agent_state(agent):
     """Save an agent's state file."""
+    agent["last_updated"] = time.time()
     filepath = os.path.join(AGENTS_DIR, f"agent_{agent['id']}.json")
     try:
         with open(filepath, 'w') as f:
@@ -254,11 +255,25 @@ def save_agent_state(agent):
         logging.error(f"Error saving state for agent {agent['id']}: {e}")
 
 
+INTERACTIVE = False
+
+
 def handle_spawn_requests(agents):
     """Process any active spawn requests from agents."""
     for agent in agents:
         spawn_req = agent.get("spawn_request")
         if spawn_req:
+            status = spawn_req.get("status", "pending")
+            if INTERACTIVE:
+                if status == "pending":
+                    # Wait for interactive approval in dashboard
+                    continue
+                elif status == "rejected":
+                    logging.info(f"Agent {agent['id']} spawn request REJECTED by user. Clearing request.")
+                    agent["spawn_request"] = None
+                    save_agent_state(agent)
+                    continue
+            
             logging.info(f"Agent {agent['id']} requested to spawn a sub-agent with goal: {spawn_req.get('goal')}")
             
             existing_ids = []
@@ -454,6 +469,123 @@ def run_cascading_kills():
             cascade(agent_id)
 
 
+BUDGET = 4
+
+
+def call_ollama_api_local(prompt, model):
+    url = "http://localhost:11434/api/generate"
+    headers = {"Content-Type": "application/json"}
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json"
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            text = res_data["response"]
+            return json.loads(text.strip())
+    except Exception:
+        return None
+
+
+def call_gemini_api_local(prompt, api_key):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    body = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        }
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(text.strip())
+    except Exception:
+        return None
+
+
+def get_active_leaf_agents(active_agents):
+    active_parent_ids = set()
+    for agent in active_agents:
+        p_ids = agent.get("parent_ids") or ([agent.get("parent_id")] if agent.get("parent_id") else [])
+        for pid in p_ids:
+            if pid:
+                active_parent_ids.add(pid)
+    leaf_agents = [a for a in active_agents if a["id"] not in active_parent_ids]
+    return leaf_agents
+
+
+def rank_leaf_agents_llm(leaf_agents, macro_goal, llm_model=OLLAMA_MODEL):
+    if not leaf_agents:
+        return []
+    
+    now = time.time()
+    def get_fallback_sort_key(agent):
+        progress = agent.get("progress", 0)
+        last_updated = agent.get("last_updated", now)
+        inactivity = now - last_updated
+        return (progress, -inactivity)
+        
+    fallback_ranking = sorted(leaf_agents, key=get_fallback_sort_key)
+    fallback_result = []
+    for a in fallback_ranking:
+        inactivity_duration = now - a.get("last_updated", now)
+        fallback_result.append({
+            "id": a["id"],
+            "reason": f"Heuristic ranking: progress is {a.get('progress', 0)}%, inactive for {int(inactivity_duration)}s."
+        })
+        
+    if not is_ollama_running() and not os.environ.get("GEMINI_API_KEY"):
+        return fallback_result
+    agents_desc = []
+    for a in leaf_agents:
+        agents_desc.append(
+            f"- Agent {a['id']}: Goal='{a.get('goal')}', Role/Personality='{a.get('personality', 'Generalist')}', "
+            f"Progress={a.get('progress')}%"
+        )
+    agents_str = "\n".join(agents_desc)
+    prompt = (
+        f"You are the Swarm Supervisor coordinating a research swarm working on the macro goal: '{macro_goal}'.\n"
+        f"The active agent budget is exceeded, and we need to evaluate which active leaf agents are least productive "
+        f"or contributing the least to the overall macro goal.\n\n"
+        f"Here are the active leaf agents:\n{agents_str}\n\n"
+        f"Please rate and rank them from LEAST productive/contributing to MOST productive/contributing. "
+        f"Return strictly a JSON object with a single key 'ranked_agents' whose value is a list of objects. "
+        f"Each object must have keys:\n"
+        f"1. 'id' (string: the agent ID, e.g. '002')\n"
+        f"2. 'reason' (string: a concise, 1-sentence explanation of why this agent is ranked at this level)\n"
+    )
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            res = call_gemini_api_local(prompt, api_key)
+        else:
+            res = call_ollama_api_local(prompt, llm_model)
+        if res and "ranked_agents" in res:
+            return res["ranked_agents"]
+    except Exception as e:
+        logging.warning(f"LLM ranking failed: {e}. Falling back to progress heuristic.")
+    return fallback_result
+
+
 def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
     """Main polling loop to calculate proximity and supervise swarm execution."""
     logging.info("V2 Proximity Supervisor started. Coordinating swarm coordinates...")
@@ -480,6 +612,42 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
             handle_spawn_requests(agents)
             
             agents = load_active_agents()
+            active_agents = [a for a in agents if a["status"] in ["exploring", "syncing", "pending_termination"]]
+            active_count = len(active_agents)
+            
+            # Dynamically read budget limit from orchestrator.json if present
+            orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+            macro_goal = "Solve task"
+            current_budget = BUDGET
+            if os.path.exists(orchestrator_file):
+                try:
+                    with open(orchestrator_file, 'r') as f_orc:
+                        orc_state = json.load(f_orc)
+                        macro_goal = orc_state.get("macro_goal", "Solve task")
+                        if "budget_limit" in orc_state:
+                            current_budget = int(orc_state["budget_limit"])
+                except Exception:
+                    pass
+                    
+            if active_count > current_budget:
+                leafs = get_active_leaf_agents(active_agents)
+                ranked = rank_leaf_agents_llm(leafs, macro_goal, OLLAMA_MODEL)
+                alert_data = {
+                    "budget_exceeded": True,
+                    "active_count": active_count,
+                    "budget_limit": current_budget,
+                    "candidates": ranked
+                }
+                alert_file = os.path.join(STATE_DIR, "budget_alert.json")
+                with open(alert_file, 'w') as f_alert:
+                    json.dump(alert_data, f_alert, indent=2)
+            else:
+                alert_file = os.path.join(STATE_DIR, "budget_alert.json")
+                if os.path.exists(alert_file):
+                    try:
+                        os.remove(alert_file)
+                    except Exception:
+                        pass
             
             # Build corpus of goals/steps for TF-IDF
             corpus = []
@@ -553,9 +721,13 @@ if __name__ == "__main__":
     parser.add_argument("--interval", type=float, default=1.5, help="Polling interval in seconds")
     parser.add_argument("--threshold", type=float, default=0.5, help="Collision distance threshold (lower = closer)")
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model to use for phase classification")
+    parser.add_argument("--interactive", action="store_true", help="Enable terminal prompts to manually negotiate collisions")
+    parser.add_argument("--budget", type=int, default=4, help="Maximum number of active agents in the swarm")
     args = parser.parse_args()
     
     OLLAMA_MODEL = args.ollama_model
+    INTERACTIVE = args.interactive
+    BUDGET = args.budget
     
     try:
         monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold)

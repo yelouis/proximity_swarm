@@ -36,6 +36,7 @@ OLLAMA_MODEL = "gemma4:latest"
 predefined_personalities = []
 current_view = "combined"
 synthesis_cache = {"last_hash": None, "content": None, "is_generating": False}
+session_budget = 4
 
 
 def compute_swarm_state_hash():
@@ -829,6 +830,201 @@ def make_tombstones_panel():
     return Panel(table, border_style="red")
 
 
+def recommend_budget_cap(query):
+    """Query Ollama to recommend a budget cap based on task complexity."""
+    if not is_ollama_running():
+        return 4
+        
+    prompt = (
+        f"You are the Swarm Architect. Analyze the following macro task query:\n"
+        f"Query: '{query}'\n\n"
+        f"Based on the complexity and scope of this task, recommend an active agent budget cap (integer limit, recommended range 2 to 8).\n"
+        f"Return strictly a JSON object with a single key 'recommended_cap' (integer).\n"
+        f"Do not include markdown code fences or explanations outside the JSON."
+    )
+    res_text = call_ollama(prompt)
+    if res_text:
+        try:
+            cleaned = extract_json(res_text)
+            data = json.loads(cleaned)
+            if "recommended_cap" in data:
+                return int(data["recommended_cap"])
+        except Exception:
+            pass
+    return 4
+
+
+def make_budget_alert_panel():
+    """Renders the swarm budget alert and pending decisions panel."""
+    alert_file = os.path.join(STATE_DIR, "budget_alert.json")
+    
+    pending_spawns = []
+    pending_blockers = []
+    if os.path.exists(AGENTS_DIR):
+        for filename in os.listdir(AGENTS_DIR):
+            if filename.endswith(".json"):
+                try:
+                    with open(os.path.join(AGENTS_DIR, filename), 'r') as f:
+                        data = json.load(f)
+                    aid = data.get("id")
+                    if data.get("spawn_request", {}).get("status") == "pending":
+                        pending_spawns.append((aid, data["spawn_request"].get("goal")))
+                    if data.get("status") == "pending_termination" and data.get("blocker_details"):
+                        pending_blockers.append((aid, data["blocker_details"].get("error_message")))
+                except Exception:
+                    pass
+
+    # Read budget alert details
+    budget_exceeded = False
+    active_count = 0
+    budget_limit = 0
+    candidates = []
+    if os.path.exists(alert_file):
+        try:
+            with open(alert_file, 'r') as f:
+                alert_data = json.load(f)
+            budget_exceeded = alert_data.get("budget_exceeded", False)
+            active_count = alert_data.get("active_count", 0)
+            budget_limit = alert_data.get("budget_limit", 0)
+            candidates = alert_data.get("candidates", [])
+        except Exception:
+            pass
+
+    content = Text()
+    
+    # 1. Render Swarm Budget Status
+    if budget_exceeded:
+        content.append("⚠️  BUDGET ALERT: Active Agents Limit Exceeded!\n", style="bold red")
+        content.append(f"   Active Agents Count: {active_count}  |  Budget Cap: {budget_limit}\n", style="yellow")
+        content.append("   Ranked Leaf Pruning Candidates (Least to Most Productive):\n", style="bold white")
+        for idx, c in enumerate(candidates):
+            content.append(f"     [{idx+1}] Agent {c['id']}: ", style="bold cyan")
+            content.append(f"{c.get('reason', 'No explanation')}\n", style="white")
+    else:
+        # Load actual active count
+        active_count_real = 0
+        if os.path.exists(AGENTS_DIR):
+            for filename in os.listdir(AGENTS_DIR):
+                if filename.endswith(".json"):
+                    try:
+                        with open(os.path.join(AGENTS_DIR, filename), 'r') as f:
+                            data = json.load(f)
+                        if data.get("status") in ["exploring", "syncing", "pending_termination"]:
+                            active_count_real += 1
+                    except Exception:
+                        pass
+        # Try to read session budget limit
+        global session_budget
+        limit_val = session_budget
+        orc_file = os.path.join(STATE_DIR, "orchestrator.json")
+        if os.path.exists(orc_file):
+            try:
+                with open(orc_file, 'r') as f_orc:
+                    orc_state = json.load(f_orc)
+                    if "budget_limit" in orc_state:
+                        limit_val = int(orc_state["budget_limit"])
+            except Exception:
+                pass
+        content.append("✅  BUDGET STATUS: Swarm within bounds.\n", style="bold green")
+        content.append(f"   Active Agents Count: {active_count_real}  |  Budget Cap: {limit_val}\n", style="dim white")
+
+    # 2. Render Pending Actions
+    if pending_spawns or pending_blockers:
+        content.append("\n⚡  PENDING INTERACTIVE DECISIONS:\n", style="bold yellow")
+        for aid, goal in pending_spawns:
+            content.append(f"   • Agent {aid}: ", style="bold cyan")
+            content.append(f"Pending Spawn Approval for goal '{goal[:40]}...'\n", style="white")
+        for aid, err in pending_blockers:
+            content.append(f"   • Agent {aid}: ", style="bold red")
+            content.append(f"Pending Blocker Action: {err[:40]}...\n", style="white")
+    else:
+        content.append("\n💤  No interactive decisions pending.", style="dim white")
+
+    return Panel(content, title="Alerts & Pending Decisions", border_style="yellow" if (budget_exceeded or pending_spawns or pending_blockers) else "dim white")
+
+
+def handle_dashboard_pruning(agent_id):
+    """Checks restrictions, kills target leaf agent, and registers a detailed pruned tombstone."""
+    agent_file = os.path.join(AGENTS_DIR, f"agent_{agent_id}.json")
+    if not os.path.exists(agent_file):
+        return False, f"Agent {agent_id} file not found."
+    
+    try:
+        with open(agent_file, 'r') as f:
+            agent_state = json.load(f)
+    except Exception as e:
+        return False, f"Failed to load Agent {agent_id} state: {e}"
+        
+    status = agent_state.get("status")
+    if status in ["completed", "dead"]:
+        return False, f"Agent {agent_id} is already in state: {status}."
+        
+    # Check if leaf agent (no other active agent lists this agent as parent)
+    active_child_found = False
+    if os.path.exists(AGENTS_DIR):
+        for filename in os.listdir(AGENTS_DIR):
+            if filename.endswith(".json") and filename != f"agent_{agent_id}.json":
+                try:
+                    filepath = os.path.join(AGENTS_DIR, filename)
+                    with open(filepath, 'r') as f:
+                        data = json.load(f)
+                    if data.get("status") in ["exploring", "syncing", "pending_termination"]:
+                        parents = data.get("parent_ids") or ([data.get("parent_id")] if data.get("parent_id") else [])
+                        if agent_id in parents:
+                            active_child_found = True
+                            break
+                except Exception:
+                    pass
+                    
+    if active_child_found:
+        return False, f"Agent {agent_id} cannot be pruned: it is not a leaf agent (active child agents depend on it)."
+        
+    # Prune the agent: set status to dead
+    agent_state["status"] = "dead"
+    save_json(agent_file, agent_state)
+    
+    # Write details to tombstones.json
+    tombstone_file = os.path.join(STATE_DIR, "tombstones.json")
+    tombstones = load_json(tombstone_file) or []
+    
+    # Get explanation from budget_alert.json if available
+    explanation = "Pruned by user due to low productivity."
+    alert_file = os.path.join(STATE_DIR, "budget_alert.json")
+    if os.path.exists(alert_file):
+        try:
+            with open(alert_file, 'r') as f:
+                alert_data = json.load(f)
+            for c in alert_data.get("candidates", []):
+                if c.get("id") == agent_id:
+                    explanation = c.get("reason", explanation)
+                    break
+        except Exception:
+            pass
+            
+    current_step = agent_state.get("current_step")
+    step_files = agent_state.get("touched_files", [])
+    step_tools = agent_state.get("tools_used", [])
+    
+    def get_iso_timestamp():
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        
+    new_tombstone = {
+        "file_path": step_files[0] if step_files else "unknown",
+        "tool_used": step_tools[0] if step_tools else "pruned",
+        "error_message": explanation,
+        "fix_action": "Avoid this approach; prune record indicates low productivity.",
+        "is_pruned": True,
+        "goal": agent_state.get("goal"),
+        "step_name": current_step.get("name") if current_step else "unknown",
+        "timestamp": get_iso_timestamp()
+    }
+    tombstones.append(new_tombstone)
+    save_json(tombstone_file, tombstones)
+    
+    return True, f"Agent {agent_id} successfully pruned. Tombstone registered."
+
+
 def make_logs_panel():
     """Renders the tail of the background supervisor logs with a commands helper banner."""
     logs_lines = []
@@ -1131,7 +1327,12 @@ def register_dynamic_task(task_id, goal, steps):
 def execute_dashboard_run(layout, supervisor_cmd):
     # Launch supervisor subprocess
     sup_proc = subprocess.Popen(supervisor_cmd)
+    is_interactive = "--interactive" in supervisor_cmd
     
+    def get_iso_timestamp():
+        from datetime import timezone
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        
     # Live loop updating layout components
     try:
         with Live(layout, refresh_per_second=5, screen=True) as live:
@@ -1140,14 +1341,201 @@ def execute_dashboard_run(layout, supervisor_cmd):
                 layout["left"].update(make_agents_table())
                 layout["center"].update(make_output_panel())
                 layout["right_top"].update(make_collisions_panel())
+                layout["right_middle"].update(make_budget_alert_panel())
                 layout["right_bottom"].update(make_tombstones_panel())
                 layout["footer"].update(make_logs_panel())
+                
+                # Check for interactive approvals
+                if is_interactive:
+                    prompt_triggered = False
+                    if os.path.exists(AGENTS_DIR):
+                        for filename in os.listdir(AGENTS_DIR):
+                            if filename.endswith(".json"):
+                                filepath = os.path.join(AGENTS_DIR, filename)
+                                try:
+                                    with open(filepath, 'r') as f:
+                                        data = json.load(f)
+                                except Exception:
+                                    continue
+                                    
+                                # 1. Check for spawn request
+                                spawn_req = data.get("spawn_request")
+                                if spawn_req and spawn_req.get("status") == "pending":
+                                    live.stop()
+                                    os.system("clear")
+                                    print("\n" + "="*60)
+                                    print("           🛰️  SPAWN REQUEST APPROVAL REQUIREMENT  🛰️")
+                                    print("="*60)
+                                    print(f"Agent ID:       {data.get('id')}")
+                                    print(f"Goal/Sub-task:  {spawn_req.get('goal')}")
+                                    print(f"Initial Files:  {', '.join(spawn_req.get('initial_files', []))}")
+                                    print("-"*60)
+                                    
+                                    try:
+                                        import termios
+                                        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                                    except Exception:
+                                        pass
+                                        
+                                    ans = input("Approve spawning this child agent? [y/N]: ").strip().lower()
+                                    if ans in ["y", "yes"]:
+                                        spawn_req["status"] = "approved"
+                                        print("\n[+] Spawn request APPROVED.")
+                                    else:
+                                        spawn_req["status"] = "rejected"
+                                        print("\n[-] Spawn request REJECTED.")
+                                        
+                                    data["spawn_request"] = spawn_req
+                                    save_json(filepath, data)
+                                    time.sleep(1.0)
+                                    prompt_triggered = True
+                                    live.start()
+                                    break
+                                    
+                                # 2. Check for pending_termination due to blocker_details
+                                status = data.get("status")
+                                blocker = data.get("blocker_details")
+                                if status == "pending_termination" and blocker:
+                                    live.stop()
+                                    os.system("clear")
+                                    print("\n" + "="*60)
+                                    print("         🛰️  SUPERVISOR BLOCKER REVIEW MODE  🛰️")
+                                    print("="*60)
+                                    print(f"Agent ID:       {data.get('id')}")
+                                    print(f"Current Goal:   {data.get('goal')}")
+                                    print(f"Blocked File:   {blocker.get('file_path')}")
+                                    print(f"Blocked Tool:   {blocker.get('tool_used')}")
+                                    print(f"Error Message:  {blocker.get('error_message')}")
+                                    print("-"*60)
+                                    print("Select Resolution Action:")
+                                    print("  1. Provide a manual workaround (text string)")
+                                    print("  2. Override and bypass (mark step completed)")
+                                    print("  3. Kill the agent (terminate execution)")
+                                    print("-"*60)
+                                    
+                                    try:
+                                        import termios
+                                        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                                    except Exception:
+                                        pass
+                                        
+                                    choice = ""
+                                    while choice not in ["1", "2", "3"]:
+                                        choice = input("Enter choice (1, 2, or 3): ").strip()
+                                        
+                                    if choice == "1":
+                                        workaround = input("Enter manual workaround details: ").strip()
+                                        if workaround:
+                                            tombstones = load_json(TOMBSTONES_FILE) or []
+                                            tombstones.append({
+                                                "file_path": blocker.get("file_path", "unknown"),
+                                                "tool_used": blocker.get("tool_used", "unknown"),
+                                                "error_message": blocker.get("error_message", "unknown"),
+                                                "fix_action": workaround,
+                                                "timestamp": get_iso_timestamp()
+                                            })
+                                            save_json(TOMBSTONES_FILE, tombstones)
+                                            print(f"\n[+] Registered workaround: '{workaround}'")
+                                        data["status"] = "exploring"
+                                        data["blocker_details"] = None
+                                        save_json(filepath, data)
+                                    elif choice == "2":
+                                        data["steps_completed"] += 1
+                                        tasks_data = load_json(MOCK_TASKS_FILE)
+                                        task_id = data.get("task_id")
+                                        if tasks_data and task_id in tasks_data.get("tasks", {}):
+                                            steps = tasks_data["tasks"][task_id].get("steps", [])
+                                            data["progress"] = int((data["steps_completed"] / len(steps)) * 100)
+                                            if data["steps_completed"] < len(steps):
+                                                next_step = steps[data["steps_completed"]]
+                                                data["current_step"] = {
+                                                    "step_id": next_step["step_id"],
+                                                    "name": next_step["name"],
+                                                    "description": next_step["description"]
+                                                }
+                                            else:
+                                                data["status"] = "completed"
+                                                data["current_step"] = None
+                                        if data["status"] != "completed":
+                                            data["status"] = "exploring"
+                                        data["blocker_details"] = None
+                                        save_json(filepath, data)
+                                        print("\n[+] Step bypassed. Resuming agent.")
+                                    elif choice == "3":
+                                        data["status"] = "dead"
+                                        data["blocker_details"] = None
+                                        save_json(filepath, data)
+                                        print("\n[-] Agent terminated.")
+                                        
+                                    time.sleep(1.0)
+                                    prompt_triggered = True
+                                    live.start()
+                                    break
+                        if prompt_triggered:
+                            continue
+                            
                 time.sleep(0.2)
                 
+                # Non-blocking check for interactive dashboard commands
+                import select
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.0)
+                if rlist:
+                    live.stop()
+                    try:
+                        import termios
+                        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                    except Exception:
+                        pass
+                    
+                    print("\n\033[1;33m[Interactive Dashboard Command Mode]\033[0m")
+                    print("Available commands:")
+                    print("  /budget <new_cap>        - Dynamically adjust the budget cap")
+                    print("  /prune <agent_id>        - Safely terminate an active leaf agent")
+                    print("  Press Enter to return to live dashboard")
+                    cmd_line = input("> ").strip()
+                    if cmd_line:
+                        parts = cmd_line.split(maxsplit=1)
+                        cmd = parts[0].lower() if parts else ""
+                        arg = parts[1] if len(parts) > 1 else None
+                        
+                        if cmd == "/budget":
+                            if not arg or not arg.isdigit():
+                                print("[-] Error: Usage: /budget <new_cap>")
+                            else:
+                                cap = int(arg)
+                                global session_budget
+                                session_budget = cap
+                                orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+                                if os.path.exists(orchestrator_file):
+                                    try:
+                                        orc_state = load_json(orchestrator_file) or {}
+                                        orc_state["budget_limit"] = cap
+                                        save_json(orchestrator_file, orc_state)
+                                        print(f"[+] Budget cap updated dynamically to {cap}")
+                                    except Exception as e:
+                                        print(f"[-] Error updating budget: {e}")
+                                else:
+                                    print("[-] Error: orchestrator.json not found")
+                        elif cmd == "/prune":
+                            if not arg:
+                                print("[-] Error: Usage: /prune <agent_id>")
+                            else:
+                                agent_id = arg.strip().zfill(3)
+                                success, msg = handle_dashboard_pruning(agent_id)
+                                if success:
+                                    print(f"[+] {msg}")
+                                else:
+                                    print(f"[-] {msg}")
+                        else:
+                            print(f"[-] Unknown command: {cmd}")
+                        time.sleep(1.5)
+                    live.start()
+                    
             layout["header"].update(make_header_panel())
             layout["left"].update(make_agents_table())
             layout["center"].update(make_output_panel())
             layout["right_top"].update(make_collisions_panel())
+            layout["right_middle"].update(make_budget_alert_panel())
             layout["right_bottom"].update(make_tombstones_panel())
             layout["footer"].update(make_logs_panel())
             
@@ -1233,6 +1621,47 @@ def run_swarm_designer(initial_list, overall_query, layout=None):
     """Enters an interactive loop to let the user review, add, edit, or remove swarm agents."""
     current_agents = list(initial_list)
     
+    # Prompt user for recommended budget cap
+    is_testing = "unittest" in sys.modules or "pytest" in sys.modules or any("unittest" in arg for arg in sys.argv)
+    if not is_testing:
+        recommended_cap = recommend_budget_cap(overall_query)
+        os.system("clear")
+        print("\n" + "="*70)
+        print("                🛰️  SWARM BUDGET CAP CONFIGURATION  🛰️")
+        print("="*70 + "\n")
+        print(f"Overall Task: '{overall_query}'")
+        print(f"Recommended Active Agent Budget Cap: {recommended_cap}")
+        print("This cap restricts the number of concurrently active agents exploring options.")
+        print("If active count exceeds the cap, warning and productivity rankings will trigger.")
+        print("-"*70)
+        try:
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
+        global session_budget
+        try:
+            ans = input(f"Confirm recommended budget cap of {recommended_cap}? [Y/n] or enter custom cap: ").strip()
+            if not ans or ans.lower() in ["y", "yes"]:
+                session_budget = recommended_cap
+            elif ans.isdigit():
+                session_budget = int(ans)
+                print(f"[+] Custom budget cap set to {session_budget}.")
+            else:
+                session_budget = recommended_cap
+        except (KeyboardInterrupt, EOFError):
+            session_budget = recommended_cap
+
+    # Write transient budget cap to orchestrator config
+    orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+    os.makedirs(STATE_DIR, exist_ok=True)
+    try:
+        orc_state = load_json(orchestrator_file) or {}
+        orc_state["budget_limit"] = session_budget
+        save_json(orchestrator_file, orc_state)
+    except Exception:
+        pass
+
     while True:
         if layout:
             os.system("clear")
@@ -1240,6 +1669,7 @@ def run_swarm_designer(initial_list, overall_query, layout=None):
             layout["left"].update(make_designer_agents_table(current_agents))
             layout["center"].update(make_designer_center_panel(overall_query))
             layout["right_top"].update(make_designer_placeholder_panel("Collision Monitor (Inactive)"))
+            layout["right_middle"].update(make_designer_placeholder_panel("Alerts / Pending Decisions (Inactive)"))
             layout["right_bottom"].update(make_designer_placeholder_panel("Tombstone Database (Inactive)"))
             layout["footer"].update(make_designer_footer_panel())
             console.print(layout)
@@ -1383,7 +1813,11 @@ def main():
     parser.add_argument("--step-delay", type=float, default=2.0, help="Agent runner step delay in seconds")
     parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
+    parser.add_argument("--budget", type=int, default=4, help="Active agent budget cap limit")
     args = parser.parse_args()
+    
+    global session_budget
+    session_budget = args.budget
     
     # Build 3-column layout
     layout = Layout()
@@ -1399,6 +1833,7 @@ def main():
     )
     layout["right"].split(
         Layout(name="right_top", ratio=1),
+        Layout(name="right_middle", ratio=1),
         Layout(name="right_bottom", ratio=1)
     )
     
@@ -1422,6 +1857,8 @@ def main():
             supervisor_cmd.extend(["--ollama-model", args.ollama_model])
         if args.step_delay:
             supervisor_cmd.extend(["--step-delay", str(args.step_delay)])
+        if session_budget:
+            supervisor_cmd.extend(["--budget", str(session_budget)])
             
         print(f"[Dashboard] Initializing simulation: {' '.join(supervisor_cmd)}...")
         time.sleep(1.0)
@@ -1443,6 +1880,7 @@ def main():
             layout["left"].update(make_agents_table())
             layout["center"].update(make_output_panel())
             layout["right_top"].update(make_collisions_panel())
+            layout["right_middle"].update(make_budget_alert_panel())
             layout["right_bottom"].update(make_tombstones_panel())
             layout["footer"].update(make_logs_panel())
             console.print(layout)
@@ -1490,6 +1928,27 @@ def main():
                         print(f"    Dedicated Goal: '{goal}'")
                 else:
                     print("\n\033[1;31m[-] Error: Role name cannot be empty.\033[0m")
+                time.sleep(1.5)
+                continue
+
+            if cmd == "/budget":
+                if not arg or not arg.isdigit():
+                    print("\n\033[1;31m[-] Error: Usage: /budget <new_cap>\033[0m")
+                    time.sleep(1.5)
+                    continue
+                cap = int(arg)
+                session_budget = cap
+                orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+                if os.path.exists(orchestrator_file):
+                    try:
+                        orc_state = load_json(orchestrator_file) or {}
+                        orc_state["budget_limit"] = cap
+                        save_json(orchestrator_file, orc_state)
+                        print(f"\n\033[1;32m[+] Budget cap updated dynamically to {cap}\033[0m")
+                    except Exception as e:
+                        print(f"\n\033[1;31m[-] Error updating budget: {e}\033[0m")
+                else:
+                    print(f"\n\033[1;32m[+] Budget cap updated to {cap} (will be applied on next run)\033[0m")
                 time.sleep(1.5)
                 continue
 
@@ -1723,13 +2182,16 @@ def main():
             
             write_to_monitor_log(f"Starting swarm with {len(agents_config)} agents. Initializing TUI dashboard visualization...", "INFO")
             
-            # Launch dynamic execution loop in dashboard
             supervisor_cmd = [
                 sys.executable, "supervisor.py",
                 "--agents-config", json.dumps(agents_config),
                 "--llm-provider", "ollama",
                 "--step-delay", "1.5"
             ]
+            if args.interactive:
+                supervisor_cmd.append("--interactive")
+            if session_budget:
+                supervisor_cmd.extend(["--budget", str(session_budget)])
             
             synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
             execute_dashboard_run(layout, supervisor_cmd)

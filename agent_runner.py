@@ -33,12 +33,21 @@ def load_json(filepath):
 
 
 def save_json(filepath, data):
+    if isinstance(data, dict):
+        import time
+        data["last_updated"] = time.time()
     try:
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
         return True
     except Exception:
         return False
+
+
+def get_iso_timestamp():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 
 def call_gemini_api(prompt):
@@ -248,8 +257,10 @@ def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest", reg
                                 else:
                                     raise
                             except Exception as ex:
+                                print(f"[Tool Execution Inner Exception]: {ex}")
                                 result = json.dumps({"error": f"Tool execution failed: {ex}"})
                         except Exception as ex:
+                            print(f"[Tool Execution Exception]: {ex}")
                             result = json.dumps({"error": f"Tool execution failed: {ex}"})
                     else:
                         result = json.dumps({"error": f"Tool '{func_name}' is not registered."})
@@ -386,7 +397,8 @@ class AgentRunner:
         self.state = load_json(self.state_file) or self.state
         self.state["spawn_request"] = {
             "goal": goal,
-            "initial_files": list(initial_files)
+            "initial_files": list(initial_files),
+            "status": "pending"
         }
         save_json(self.state_file, self.state)
         print(f"  [Spawn Request] Registered request to spawn child agent with goal: '{goal}'")
@@ -394,6 +406,108 @@ class AgentRunner:
             "status": "success",
             "message": f"Spawn request registered for goal: '{goal}'. The supervisor will launch the child agent shortly."
         })
+
+    def evaluate_isolation_spawn(self):
+        steps_comp = self.state.get("steps_completed", 0)
+        if steps_comp <= 0 or steps_comp % 5 != 0:
+            return
+
+        is_semantically_isolated = False
+        active_peer_goals = []
+        if os.path.exists(AGENTS_DIR):
+            for filename in os.listdir(AGENTS_DIR):
+                if filename.endswith(".json") and not filename.endswith(f"agent_{self.agent_id}.json"):
+                    try:
+                        filepath = os.path.join(AGENTS_DIR, filename)
+                        with open(filepath, 'r') as f:
+                            data = json.load(f)
+                        if data.get("status") in ["exploring", "syncing"]:
+                            if self.sub_swarm_id and data.get("sub_swarm_id") == self.sub_swarm_id:
+                                active_peer_goals.append(data.get("goal", ""))
+                            elif not self.sub_swarm_id:
+                                active_peer_goals.append(data.get("goal", ""))
+                    except Exception:
+                        pass
+
+        # Calculate semantic isolation (Suggestion 1)
+        if not active_peer_goals:
+            is_semantically_isolated = True
+        else:
+            try:
+                import memory_store
+                scores = memory_store.compute_tfidf_similarities(self.state["goal"], active_peer_goals)
+                max_sim = max(scores) if scores else 0.0
+                if max_sim < 0.35:
+                    is_semantically_isolated = True
+            except Exception:
+                is_semantically_isolated = len(active_peer_goals) == 0
+                
+        # Calculate episodic novelty (Suggestion 2)
+        is_novel = False
+        try:
+            import memory_store
+            matches = memory_store.query_similar_episodes(self.state["goal"], top_k=1)
+            if not matches or matches[0]["score"] < 0.5:
+                is_novel = True
+        except Exception:
+            is_novel = True
+
+        if is_semantically_isolated or is_novel:
+            print(f"  [Explore Skill] Agent {self.agent_id} is isolated (semantically: {is_semantically_isolated}) or novel (novelty: {is_novel}). Evaluating spawn...")
+            
+            task_id = self.state.get("task_id")
+            tasks_data = load_json(MOCK_TASKS_FILE)
+            remaining_steps_desc = ""
+            default_goal = f"Parallel sub-task helper for Agent {self.agent_id}"
+            default_files = ["helper_output.txt"]
+            
+            if tasks_data and task_id in tasks_data.get("tasks", {}):
+                task = tasks_data["tasks"][task_id]
+                steps = task["steps"]
+                completed_count = self.state["steps_completed"]
+                if completed_count < len(steps):
+                    next_step = steps[completed_count]
+                    default_goal = f"Parallel sub-task: {next_step['description']}"
+                    default_files = self.apply_offset_to_files(next_step.get("touched_files", []))
+                    remaining_steps_desc = "\n".join([f"- Step {s['step_id']}: {s['name']} - {s['description']}" for s in steps[completed_count:]])
+
+            goal = default_goal
+            initial_files = default_files
+            
+            provider = self.llm_provider
+            if not provider:
+                if os.environ.get("GEMINI_API_KEY"):
+                    provider = "gemini"
+                elif is_ollama_running():
+                    provider = "ollama"
+            
+            if provider in ["gemini", "ollama"] and remaining_steps_desc:
+                prompt = (
+                    f"You are the Swarm Agent {self.agent_id} working on the task: '{self.state['goal']}'.\n"
+                    f"You have been working in isolation for 5 steps without other agents' help.\n"
+                    f"Here are your remaining steps:\n{remaining_steps_desc}\n\n"
+                    f"Evaluate if spawning a helper agent with a specific sub-task will accelerate execution.\n"
+                    f"Respond strictly in JSON with keys:\n"
+                    f"1. 'should_spawn' (boolean: true/false)\n"
+                    f"2. 'goal' (string: clear narrow task goal for the helper agent)\n"
+                    f"3. 'initial_files' (array of strings: files for helper to edit/create)\n"
+                )
+                res = None
+                try:
+                    if provider == "gemini":
+                        res = call_gemini_api(prompt)
+                    elif provider == "ollama":
+                        res = call_ollama_api(prompt, model=self.ollama_model)
+                except Exception:
+                    pass
+                
+                if res and res.get("should_spawn"):
+                    goal = res.get("goal", default_goal)
+                    initial_files = res.get("initial_files", default_files)
+                    if isinstance(initial_files, str):
+                        initial_files = [initial_files]
+
+            self.request_spawn_agent(goal, initial_files)
 
     def load_historical_context(self):
         """Loads historical context from episodic memory matching the goal."""
@@ -514,11 +628,26 @@ class AgentRunner:
         """Query tombstones.json to check if any upcoming command/file matches a known dead-end."""
         tombstones = load_json(TOMBSTONES_FILE) or []
         for t in tombstones:
+            if t.get("is_pruned"):
+                continue
             file_match = any(f in t.get("file_path", "") for f in files)
             tool_match = any(tool == t.get("tool_used", "") for tool in tools)
             if file_match and tool_match:
                 return t
         return None
+
+    def check_pruned_tombstones(self, files, tools):
+        """Query tombstones.json to retrieve warning context for pruned paths."""
+        tombstones = load_json(TOMBSTONES_FILE) or []
+        pruned_matches = []
+        for t in tombstones:
+            if not t.get("is_pruned"):
+                continue
+            file_match = any(f in t.get("file_path", "") for f in files)
+            tool_match = any(tool == t.get("tool_used", "") for tool in tools)
+            if file_match and tool_match:
+                pruned_matches.append(t)
+        return pruned_matches
 
     def execute_step(self):
         self.state = load_json(self.state_file)
@@ -544,6 +673,12 @@ class AgentRunner:
             print(f"\n[SYNC REQUIRED] Agent {self.agent_id} has been PAUSED. Starting Negotiation Skill...")
             self.perform_negotiation()
             return
+
+        # Start-of-step state save to ensure coordinates (status, progress, current_step, files, tools) are synced
+        save_json(self.state_file, self.state)
+        
+        # Evaluate isolated spawn every 5 steps
+        self.evaluate_isolation_spawn()
 
         # 2. Progress task step
         task_id = self.state.get("task_id")
@@ -595,11 +730,53 @@ class AgentRunner:
                 step_tools = [t if t != "gcc" else "clang" for t in step_tools]
                 applied_workaround = True
                 print(f"  Action: Swapped compilation tool from 'gcc' to 'clang'.")
+            
+            if not applied_workaround:
+                print(f"  [ABSOLUTE BLOCKADE] Blocker is absolute and no workaround could be applied.")
+                self.state["status"] = "pending_termination"
+                self.state["blocker_details"] = {
+                    "file_path": tombstone.get("file_path", "unknown"),
+                    "tool_used": tombstone.get("tool_used", "unknown"),
+                    "error_message": tombstone.get("error_message", "unknown"),
+                    "fix_action": tombstone.get("fix_action", "unknown")
+                }
+                save_json(self.state_file, self.state)
+                self.save_memory_episode(status="failed", error_message=tombstone['error_message'])
+                try:
+                    import causal_tracer
+                    causal_tracer.log_step_execution(
+                        self.agent_id,
+                        current_step["step_id"],
+                        current_step["name"],
+                        current_step["description"],
+                        "failed",
+                        {"error": tombstone['error_message']}
+                    )
+                    causal_tracer.log_state_transition(
+                        self.agent_id, "exploring", "pending_termination",
+                        {"error": f"Absolute blockade from tombstone: {tombstone['error_message']}"}
+                    )
+                except Exception:
+                    pass
+                return
                 
         # If final step and no files specified, use fallback answer.md to display output in dashboard
         is_final_step = (self.state["steps_completed"] + 1) >= len(steps)
         if not step_files and is_final_step:
             step_files = ["answer.md"]
+
+        # Check for pruned tombstones warning context
+        pruned_matches = self.check_pruned_tombstones(step_files, step_tools)
+        pruned_context_str = ""
+        if pruned_matches:
+            print(f"  [!WARNING] Previous agent(s) were pruned on a similar step. Ingesting context...")
+            pruned_context_str = "=== ADVISORY: PREVIOUS PRUNING ENCOUNTERED ===\n"
+            for pm in pruned_matches:
+                pruned_context_str += (
+                    f"- A previous agent working on goal '{pm.get('goal', 'unknown')}' was pruned at step '{pm.get('step_name', 'unknown')}' "
+                    f"due to being unproductive or taking too long. Explanation/Reason: {pm.get('error_message', 'none')}\n"
+                )
+            pruned_context_str += "Please analyze this and adjust your strategy to avoid taking too long, or consider breaking the task down into smaller sub-tasks to improve productivity.\n\n"
 
         # Simulate execution / Touch files in local sandbox workspace
         for filename in step_files:
@@ -609,6 +786,8 @@ class AgentRunner:
             content = f"# Agent {self.agent_id} completed {current_step['name']} at {time.time()}\n"
             if self.llm_provider == "ollama" and is_ollama_running():
                 prompt = ""
+                if pruned_context_str:
+                    prompt += pruned_context_str + "\n"
                 if getattr(self, "historical_context", None):
                     prompt += self.historical_context + "\n\n"
                 prompt += (
@@ -636,6 +815,8 @@ class AgentRunner:
                         f"Do not block on the sub-agent; spawn it and continue with your main tasks."
                     )
                     user_prompt = ""
+                    if pruned_context_str:
+                        user_prompt += pruned_context_str + "\n"
                     if getattr(self, "historical_context", None):
                         user_prompt += self.historical_context + "\n\n"
                     user_prompt += (
@@ -698,13 +879,19 @@ class AgentRunner:
                 "tool_used": step_tools[0] if step_tools else "unknown",
                 "error_message": error_msg,
                 "fix_action": fix_msg,
-                "timestamp": time.time()
+                "timestamp": get_iso_timestamp()
             }
             tombstones.append(new_tombstone)
             save_json(TOMBSTONES_FILE, tombstones)
             print(f"  [TOMBSTONE REGISTERED] Saved failure context to tombstones.json.")
             
             self.state["status"] = "pending_termination"
+            self.state["blocker_details"] = {
+                "file_path": step_files[0] if step_files else "unknown",
+                "tool_used": step_tools[0] if step_tools else "unknown",
+                "error_message": error_msg,
+                "fix_action": fix_msg
+            }
             save_json(self.state_file, self.state)
             self.save_memory_episode(status="failed", error_message=error_msg)
             try:
@@ -896,6 +1083,14 @@ class AgentRunner:
             agent_b["status"] = "exploring"
             self.share_knowledge_files(agent_a["id"], agent_b["id"])
             
+            # Survivor absorbs loser's files/tools state
+            for f in agent_a.get("touched_files", []):
+                if f not in agent_b["touched_files"]:
+                    agent_b["touched_files"].append(f)
+            for t in agent_a.get("tools_used", []):
+                if t not in agent_b["tools_used"]:
+                    agent_b["tools_used"].append(t)
+
             # Dynamic Multi-Parent link: agent_b (survivor) inherits agent_a's parents!
             b_parents = agent_b.get("parent_ids") or ([agent_b.get("parent_id")] if agent_b.get("parent_id") else [])
             a_parents = agent_a.get("parent_ids") or ([agent_a.get("parent_id")] if agent_a.get("parent_id") else [])
@@ -919,6 +1114,14 @@ class AgentRunner:
             agent_b["status"] = "pending_termination"
             self.share_knowledge_files(agent_b["id"], agent_a["id"])
             
+            # Survivor absorbs loser's files/tools state
+            for f in agent_b.get("touched_files", []):
+                if f not in agent_a["touched_files"]:
+                    agent_a["touched_files"].append(f)
+            for t in agent_b.get("tools_used", []):
+                if t not in agent_a["tools_used"]:
+                    agent_a["tools_used"].append(t)
+
             # Dynamic Multi-Parent link: agent_a (survivor) inherits agent_b's parents!
             a_parents = agent_a.get("parent_ids") or ([agent_a.get("parent_id")] if agent_a.get("parent_id") else [])
             b_parents = agent_b.get("parent_ids") or ([agent_b.get("parent_id")] if agent_b.get("parent_id") else [])
@@ -940,6 +1143,151 @@ class AgentRunner:
         else:  # keep_both
             agent_a["status"] = "exploring"
             agent_b["status"] = "exploring"
+            
+            # Exchange knowledge by mutually sharing files
+            self.share_knowledge_files(agent_a["id"], agent_b["id"])
+            self.share_knowledge_files(agent_b["id"], agent_a["id"])
+            
+            def apply_offset(files, offset_suffix):
+                if not offset_suffix:
+                    return list(files)
+                result = []
+                for f in files:
+                    base, ext = os.path.splitext(f)
+                    result.append(f"{base}_{offset_suffix}{ext}")
+                return result
+
+            def review_peer_step(our_step, peer_step, our_id, peer_id, our_offset):
+                provider = self.llm_provider
+                if not provider:
+                    if os.environ.get("GEMINI_API_KEY"):
+                        provider = "gemini"
+                    elif is_ollama_running():
+                        provider = "ollama"
+                    else:
+                        provider = "rules"
+                
+                peer_ws = os.path.join(WORKSPACES_DIR, f"agent_{peer_id}")
+                peer_files_content = {}
+                peer_touched_files = peer_step.get("touched_files", [])
+                
+                for f in peer_touched_files:
+                    f_path = os.path.join(peer_ws, f)
+                    if not os.path.exists(f_path):
+                        base, ext = os.path.splitext(f)
+                        f_path = os.path.join(peer_ws, f"{base}_{our_offset}{ext}" if our_offset else f)
+                    if os.path.exists(f_path):
+                        try:
+                            with open(f_path, 'r') as file_obj:
+                                peer_files_content[f] = file_obj.read()
+                        except Exception:
+                            pass
+                
+                if provider in ["gemini", "ollama"] and peer_files_content:
+                    files_str = "\n".join([f"=== File: {fname} ===\n{content}\n" for fname, content in peer_files_content.items()])
+                    prompt = (
+                        f"You are Proximity Swarm Agent {our_id}.\n"
+                        f"You are evaluating whether you need to execute your next step:\n"
+                        f"Step Name: {our_step.get('name')}\n"
+                        f"Step Description: {our_step.get('description')}\n\n"
+                        f"Another agent (Agent {peer_id}) has already completed the following step:\n"
+                        f"Completed Step Name: {peer_step.get('name')}\n"
+                        f"Completed Step Description: {peer_step.get('description')}\n\n"
+                        f"The peer agent generated/modified these files with the following content:\n"
+                        f"{files_str}\n"
+                        f"Review if the output files satisfy the goal of your step so that you can safely bypass it (should_bypass: true) "
+                        f"or if you still need to execute your step (should_bypass: false).\n\n"
+                        f"Respond strictly in JSON with keys:\n"
+                        f"1. 'should_bypass' (boolean: true or false)\n"
+                        f"2. 'reason' (string explanation of your review decision)\n"
+                    )
+                    try:
+                        if provider == "gemini":
+                            res = call_gemini_api(prompt)
+                        else:
+                            res = call_ollama_api(prompt, model=self.ollama_model)
+                        if res and "should_bypass" in res:
+                            print(f"  [Step Review] Agent {our_id} reviewed Agent {peer_id}'s step '{peer_step.get('name')}': should_bypass={res['should_bypass']}, Reason: {res.get('reason')}")
+                            return res["should_bypass"]
+                    except Exception as ex:
+                        print(f"  [Step Review Exception] LLM call failed: {ex}")
+                
+                name_match = our_step["name"] == peer_step["name"]
+                touched_intersect = bool(set(apply_offset(our_step.get("touched_files", []), our_offset)) & set(apply_offset(peer_touched_files, our_offset)))
+                return name_match or touched_intersect
+
+            # Bypass steps completed by the other agent
+            tasks_data = load_json(MOCK_TASKS_FILE)
+            if tasks_data and "tasks" in tasks_data:
+                a_task_id = agent_a.get("task_id")
+                b_task_id = agent_b.get("task_id")
+                
+                a_steps = tasks_data["tasks"].get(a_task_id, {}).get("steps", []) if a_task_id else []
+                b_steps = tasks_data["tasks"].get(b_task_id, {}).get("steps", []) if b_task_id else []
+                
+                a_offset = agent_a.get("offset_suffix")
+                b_offset = agent_b.get("offset_suffix")
+                
+                # Bypass for Agent B
+                b_completed = agent_b["steps_completed"]
+                while b_completed < len(b_steps):
+                    b_step = b_steps[b_completed]
+                    matched = False
+                    
+                    for i in range(agent_a["steps_completed"]):
+                        if i < len(a_steps):
+                            a_step = a_steps[i]
+                            if review_peer_step(b_step, a_step, agent_b["id"], agent_a["id"], b_offset):
+                                matched = True
+                                break
+                    if matched:
+                        print(f"  [Deconfliction Bypass] Agent B ({agent_b['id']}) bypassing peer-reviewed step: '{b_step['name']}'")
+                        b_completed += 1
+                    else:
+                        break
+                agent_b["steps_completed"] = b_completed
+                agent_b["progress"] = int((b_completed / len(b_steps)) * 100) if b_steps else 0
+                if b_completed < len(b_steps):
+                    next_step = b_steps[b_completed]
+                    agent_b["current_step"] = {
+                        "step_id": next_step["step_id"],
+                        "name": next_step["name"],
+                        "description": next_step["description"]
+                    }
+                else:
+                    agent_b["status"] = "completed"
+                    agent_b["current_step"] = None
+                
+                # Bypass for Agent A
+                a_completed = agent_a["steps_completed"]
+                while a_completed < len(a_steps):
+                    a_step = a_steps[a_completed]
+                    matched = False
+                    
+                    for i in range(agent_b["steps_completed"]):
+                        if i < len(b_steps):
+                            b_step = b_steps[i]
+                            if review_peer_step(a_step, b_step, agent_a["id"], agent_b["id"], a_offset):
+                                matched = True
+                                break
+                    if matched:
+                        print(f"  [Deconfliction Bypass] Agent A ({agent_a['id']}) bypassing peer-reviewed step: '{a_step['name']}'")
+                        a_completed += 1
+                    else:
+                        break
+                agent_a["steps_completed"] = a_completed
+                agent_a["progress"] = int((a_completed / len(a_steps)) * 100) if a_steps else 0
+                if a_completed < len(a_steps):
+                    next_step = a_steps[a_completed]
+                    agent_a["current_step"] = {
+                        "step_id": next_step["step_id"],
+                        "name": next_step["name"],
+                        "description": next_step["description"]
+                    }
+                else:
+                    agent_a["status"] = "completed"
+                    agent_a["current_step"] = None
+
             try:
                 import causal_tracer
                 causal_tracer.log_state_transition(agent_a["id"], "syncing", "exploring", {"reason": "keep both (complementary)"})
@@ -969,16 +1317,21 @@ class AgentRunner:
         self.state = load_json(self.state_file)
 
     def share_knowledge_files(self, loser_id, survivor_id):
-        """Copies any files created by the losing agent to the survivor's workspace."""
+        """Copies any files created by the losing agent to the survivor's workspace and shared workspace."""
         loser_ws = os.path.join(WORKSPACES_DIR, f"agent_{loser_id}")
         survivor_ws = os.path.join(WORKSPACES_DIR, f"agent_{survivor_id}")
+        shared_ws = os.path.join(WORKSPACES_DIR, "shared")
+        
+        os.makedirs(shared_ws, exist_ok=True)
         
         if os.path.exists(loser_ws):
-            print(f"  [State Transfer] Migrating partial files from Agent {loser_id} to Agent {survivor_id}...")
+            print(f"  [State Transfer] Migrating partial files from Agent {loser_id} to Agent {survivor_id} and shared workspace...")
             for root, dirs, files in os.walk(loser_ws):
                 for file in files:
                     src = os.path.join(root, file)
                     rel = os.path.relpath(src, loser_ws)
+                    
+                    # Copy to survivor's workspace
                     dest = os.path.join(survivor_ws, rel)
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     try:
@@ -986,9 +1339,21 @@ class AgentRunner:
                             content = f_in.read()
                         with open(dest, 'w') as f_out:
                             f_out.write(content)
-                            f_out.write(f"# Inherited from Agent {loser_id} during collision resolution.\n")
+                            f_out.write(f"\n# Inherited from Agent {loser_id} during collision resolution.\n")
                     except Exception as e:
-                        print(f"    Failed to copy {file}: {e}")
+                        print(f"    Failed to copy {file} to survivor: {e}")
+                        
+                    # Copy to shared workspace
+                    shared_dest = os.path.join(shared_ws, rel)
+                    os.makedirs(os.path.dirname(shared_dest), exist_ok=True)
+                    try:
+                        with open(src, 'r') as f_in:
+                            content = f_in.read()
+                        with open(shared_dest, 'w') as f_out:
+                            f_out.write(content)
+                            f_out.write(f"\n# Deposited by Agent {loser_id} to shared workspace.\n")
+                    except Exception as e:
+                        print(f"    Failed to copy {file} to shared workspace: {e}")
 
 
 def main():

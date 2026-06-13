@@ -229,5 +229,28 @@ To introduce high-reliability self-healing execution at the step level, the syst
 - **Context Window Resetting**: During the self-healing retry iterations, the chat message history is reset. Instead of accumulating previous failed attempts (which dilutes the local LLM's instruction-following quality), the runner initiates a clean context window containing only the target goals, the current file contents, and the raw compiler/test traceback error.
 - **Test-Driven Progress Gates**: The agent's progress bar (e.g. 33% -> 66%) is strictly tied to successful step verification. A step is not counted as completed, and progress is not advanced, until the associated verification tests return exit code 0, ensuring TUI progress indicators reflect concrete math/compilation milestones.
 
+---
+
+## 14. Interactive Swarm Budget & Pruning System
+
+To manage computational overhead and prevent runaway subagent spawning when tackling open-ended research problems, the framework implements an interactive swarm budgeting and safe pruning subsystem:
+
+- **Active Swarm Budget Enforcer**: A CLI argument (`--budget`, default 4) sets the active agent cap limit. The supervisor and monitor daemon continuously evaluate active/exploring agents; completed, dead, or paused agents do not consume budget slots.
+- **LLM-Based Leaf Agent Productivity Ranking**: If the active count exceeds the cap, the monitor daemon identifies active **leaf agents** (active agents with no active children/descendants). It queries local Ollama or the Gemini API to evaluate each leaf agent's goal and progress log, ranking them from least to most productive.
+- **Heuristic Fallback Ranking**: If the LLM is offline or slow, the system automatically falls back to sorting leaf agents based on steps completed percentage (ascending) and inactivity duration (descending, prioritizing older/idle agents).
+- **TUI Alerts and Pending Decisions Layout**: The right column of the terminal dashboard is statically divided into three sections: Collisions (top), Alerts/Pending Decisions (middle), and Tombstones (bottom). Budget cap violations, leaf pruning candidates with explanations, pending spawn approvals, and blocker reviews are rendered dynamically here.
+- **Safe Leaf-Only Pruning Commands**: Users can dynamically execute `/budget <new_cap>` to adjust limits, or `/prune <agent_id>` to terminate execution. Pruning is strictly restricted to leaf agents to prevent cascading shutdowns of downstream active branches.
+- **Administrative Tombstone Records**: Pruned agents set their status to `"dead"` and write their goals, explanations, and metadata to `tombstones.json` with an `is_pruned: true` flag. Future agents do not block on these tombstones, but they ingest the prune warnings during step execution to avoid taking too long or to guide task decomposition.
+
+---
+
+## 15. Proximity & Novelty-Driven Spawning
+
+To solve complex, open-ended tasks like unsolved mathematical theorems (e.g. Collatz Conjecture), the isolation spawning check is refined to measure semantic similarity and historical novelty:
+
+- **Semantic Isolation Check**: Every 5 steps, the agent runner computes TF-IDF similarity against active peer agents. If no peer goal similarity exceeds 0.35, the agent is considered semantically isolated.
+- **Episodic Novelty Check**: The agent queries its SQLite vector episodic database. If the best-match similarity of past runs is under 0.50, the task approach is marked as novel.
+- **Novelty Spawning Gating**: If the agent is semantically isolated OR the approach is memory-novel, spawning is triggered to launch a specialized subagent (e.g. searching for computational counterexamples), accelerating execution via parallel investigation loops.
+
 
 
