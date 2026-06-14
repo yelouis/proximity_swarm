@@ -1674,7 +1674,7 @@ def execute_dashboard_run(layout, supervisor_cmd):
 
     # Live loop updating layout components
     try:
-        with Live(layout, refresh_per_second=5, screen=True, redirect_stdin=False) as live:
+        with Live(layout, refresh_per_second=5, screen=True) as live:
             while sup_proc.poll() is None:
                 # 1. Update status/error message timer
                 if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
@@ -2196,7 +2196,7 @@ def run_swarm_designer(initial_list, overall_query, layout=None):
     }
 
     if layout:
-        with Live(layout, refresh_per_second=5, screen=True, redirect_stdin=False) as live:
+        with Live(layout, refresh_per_second=5, screen=True) as live:
             while True:
                 if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
                     prompt_state["error_msg"] = None
@@ -2674,6 +2674,25 @@ def run_swarm_workflow(user_input, layout, args):
     execute_dashboard_run(layout, supervisor_cmd)
 
 
+import contextlib
+
+@contextlib.contextmanager
+def raw_terminal():
+    import sys
+    fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+    if fd is None:
+        yield None
+        return
+    import termios
+    import tty
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        yield fd
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 # Persistent Interactive TUI Dashboard Mode
 def run_tui_loop(layout, args):
     global TUI_STATE, TUI_MACRO_GOAL, TUI_RECOMMENDED_CAP, TUI_DESIGNER_AGENTS
@@ -2698,7 +2717,7 @@ def run_tui_loop(layout, args):
         from datetime import timezone
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    with Live(layout, refresh_per_second=5, screen=True, redirect_stdin=False) as live:
+    with raw_terminal() as fd, Live(layout, refresh_per_second=5, screen=True) as live:
         while True:
             # 1. Update status/error message timer
             if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
@@ -2787,18 +2806,15 @@ def run_tui_loop(layout, args):
             # 4. Read input character non-blockingly
             import select
             try:
-                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if rlist:
-                    import tty
-                    import termios
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-                    try:
-                        tty.setraw(fd)
-                        ch = sys.stdin.read(1)
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                        
+                if fd is not None:
+                    rlist, _, _ = select.select([fd], [], [], 0.05)
+                    if rlist:
+                        import os
+                        b = os.read(fd, 1)
+                        ch = b.decode("utf-8", errors="ignore")
+                else:
+                    rlist = []
+                if fd is not None and rlist:
                     if prompt_state["error_msg"]:
                         prompt_state["error_msg"] = None
                         
