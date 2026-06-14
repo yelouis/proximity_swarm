@@ -538,6 +538,20 @@ class TestSkillsIntegration(unittest.TestCase):
             self.assertEqual(ranked_equal[0]["id"], "003")
             self.assertEqual(ranked_equal[1]["id"], "002")
             
+            # Now set output tokens of 002 to 1000 and 003 to 10.
+            # Since 002 has consumed more tokens, it should be ranked first (pruned first) despite being more active.
+            agent_002["output_tokens"] = 1000
+            agent_003["output_tokens"] = 10
+            save_json(os.path.join(agent_runner.AGENTS_DIR, "agent_002.json"), agent_002)
+            save_json(os.path.join(agent_runner.AGENTS_DIR, "agent_003.json"), agent_003)
+            leafs_updated_t = [agent_001, agent_002, agent_003]
+            leafs_filtered_t = proximity_monitor.get_active_leaf_agents(leafs_updated_t)
+            with unittest.mock.patch("proximity_monitor.is_ollama_running", return_value=False), \
+                 unittest.mock.patch("os.environ.get", return_value=None):
+                ranked_tokens = proximity_monitor.rank_leaf_agents_llm(leafs_filtered_t, "Macro goal")
+            self.assertEqual(ranked_tokens[0]["id"], "002")
+            self.assertEqual(ranked_tokens[1]["id"], "003")
+            
             # 4. Test dashboard pruning commands and safety
             terminal_dashboard.AGENTS_DIR = agent_runner.AGENTS_DIR
             terminal_dashboard.STATE_DIR = agent_runner.STATE_DIR

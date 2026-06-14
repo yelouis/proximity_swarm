@@ -38,6 +38,167 @@ current_view = "combined"
 synthesis_cache = {"last_hash": None, "content": None, "is_generating": False}
 session_budget = 4
 
+# TUI State Machine variables
+TUI_STATE = "MENU"  # "MENU", "DECOMPOSING_MACRO", "BUDGET_CONFIRM", "DESIGNER", "DECOMPOSING_AGENTS", "RUNNING"
+TUI_MACRO_GOAL = ""
+TUI_RECOMMENDED_CAP = 20000
+TUI_DESIGNER_AGENTS = []
+TUI_DECOMPOSE_PROGRESS = {
+    "current": 0,
+    "total": 0,
+    "agent_role": "",
+    "agent_id": ""
+}
+TUI_SUPERVISOR_CMD = None
+TUI_SUPERVISOR_PROC = None
+TUI_ARGS = None
+
+def bg_decompose_macro_goal(query):
+    global TUI_STATE, TUI_DESIGNER_AGENTS, TUI_RECOMMENDED_CAP
+    try:
+        orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+        os.makedirs(STATE_DIR, exist_ok=True)
+        
+        initial_swarm = []
+        if predefined_personalities:
+            for idx, entry in enumerate(predefined_personalities):
+                initial_swarm.append({
+                    "role": entry["role"],
+                    "goal": entry["goal"] or query,
+                    "sub_swarm_id": "swarm_001"
+                })
+            orchestrator_state = {
+                "macro_goal": query,
+                "sub_swarms": {
+                    "swarm_001": {
+                        "id": "swarm_001",
+                        "goal": query,
+                        "role": "Custom Swarm",
+                        "dependencies": [],
+                        "status": "pending",
+                        "agent_ids": []
+                    }
+                }
+            }
+            save_json(orchestrator_file, orchestrator_state)
+        else:
+            write_to_monitor_log(f"No custom agents defined. Decomposing task into sub-swarms for: '{query}'...", "INFO")
+            decomposition = decompose_macro_goal(query)
+            
+            sub_swarms_dict = {}
+            for s in decomposition.get("sub_swarms", []):
+                sub_swarms_dict[s["id"]] = {
+                    "id": s["id"],
+                    "goal": s["goal"],
+                    "role": s["role"],
+                    "dependencies": s.get("dependencies", []),
+                    "status": "pending",
+                    "agent_ids": []
+                }
+                initial_swarm.append({
+                    "role": s["role"],
+                    "goal": s["goal"],
+                    "sub_swarm_id": s["id"]
+                })
+                
+            orchestrator_state = {
+                "macro_goal": query,
+                "sub_swarms": sub_swarms_dict
+            }
+            save_json(orchestrator_file, orchestrator_state)
+            
+        TUI_DESIGNER_AGENTS = initial_swarm
+        TUI_RECOMMENDED_CAP = recommend_budget_cap(query)
+        TUI_STATE = "BUDGET_CONFIRM"
+    except Exception as e:
+        write_to_monitor_log(f"Error in macro decomposition background thread: {e}", "ERROR")
+        TUI_STATE = "MENU"
+
+def bg_decompose_agent_goals():
+    global TUI_STATE, TUI_DECOMPOSE_PROGRESS, TUI_SUPERVISOR_CMD
+    try:
+        now_ts = int(time.time())
+        agents_config = []
+        total = len(TUI_DESIGNER_AGENTS)
+        
+        TUI_DECOMPOSE_PROGRESS.update({
+            "total": total,
+            "current": 0,
+            "agent_role": "",
+            "agent_id": ""
+        })
+        
+        for idx, entry in enumerate(TUI_DESIGNER_AGENTS):
+            agent_role = entry.get("role", "Generalist")
+            agent_goal = entry.get("goal") or TUI_MACRO_GOAL
+            agent_id = f"{idx+1:03d}"
+            agent_sub_swarm = entry.get("sub_swarm_id", "swarm_001")
+            
+            TUI_DECOMPOSE_PROGRESS.update({
+                "current": idx + 1,
+                "agent_role": agent_role,
+                "agent_id": agent_id
+            })
+            
+            write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
+            steps = generate_task_steps(agent_goal)
+            if not steps:
+                steps = [
+                    {
+                        "step_id": 1,
+                        "name": "General Execution",
+                        "description": f"Perform tasks for: {agent_goal}",
+                        "touched_files": [f"src/agent_{agent_id}_output.md"],
+                        "tools": ["edit_file"]
+                    }
+                ]
+            
+            task_id = f"task_dynamic_{now_ts}_{idx}"
+            register_dynamic_task(task_id, agent_goal, steps)
+            
+            agents_config.append({
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "personality": agent_role,
+                "goal": agent_goal,
+                "sub_swarm_id": agent_sub_swarm
+            })
+            
+        # Update orchestrator.json with final assigned agent IDs
+        orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+        orchestrator_state = load_json(orchestrator_file)
+        if orchestrator_state:
+            for sid in orchestrator_state["sub_swarms"]:
+                orchestrator_state["sub_swarms"][sid]["agent_ids"] = []
+            for item in agents_config:
+                sid = item["sub_swarm_id"]
+                if sid in orchestrator_state["sub_swarms"]:
+                    orchestrator_state["sub_swarms"][sid]["agent_ids"].append(item["agent_id"])
+            save_json(orchestrator_file, orchestrator_state)
+            
+        predefined_personalities.clear()
+        
+        write_to_monitor_log(f"Starting swarm with {len(agents_config)} agents. Initializing TUI dashboard visualization...", "INFO")
+        
+        # Prepare supervisor subprocess command
+        supervisor_cmd = [
+            sys.executable, "supervisor.py",
+            "--agents-config", json.dumps(agents_config),
+            "--llm-provider", "ollama",
+            "--step-delay", "1.5"
+        ]
+        if TUI_ARGS and TUI_ARGS.interactive:
+            supervisor_cmd.append("--interactive")
+        if session_budget:
+            supervisor_cmd.extend(["--budget", str(session_budget)])
+            
+        synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
+        TUI_SUPERVISOR_CMD = supervisor_cmd
+        TUI_STATE = "RUNNING"
+    except Exception as e:
+        write_to_monitor_log(f"Error in agent decomposition background thread: {e}", "ERROR")
+        TUI_STATE = "MENU"
+
 
 def compute_swarm_state_hash():
     """Computes a unique string hash based on agent states and workspace file modification times."""
@@ -592,6 +753,8 @@ def make_header_panel():
 
 def make_agents_table():
     """Renders a table showing states and progress of all agents."""
+    if TUI_STATE in ["DESIGNER", "DECOMPOSING_AGENTS"]:
+        return make_designer_agents_table(TUI_DESIGNER_AGENTS)
     table = Table(title="Agent Swarm Status", expand=True)
     table.add_column("ID", justify="center", style="bold white", width=6)
     table.add_column("Parent", justify="center", style="dim white", width=8)
@@ -669,7 +832,66 @@ def make_agents_table():
 
 def make_output_panel():
     """Renders either the combined hierarchical synthesis or a specific agent's workspace files."""
-    if current_view == "combined":
+    if TUI_STATE == "DECOMPOSING_MACRO":
+        return Panel(Align.center(Text(f"\n\n\n⏳ Decomposing macro task into sub-swarms via LLM...\n\nTask: '{TUI_MACRO_GOAL}'\n\nThis may take up to 10-15 seconds. Please wait...", style="bold yellow")), title="Macro Goal Decomposition", border_style="yellow")
+    elif TUI_STATE == "BUDGET_CONFIRM":
+        return Panel(Text(f"\n🛰️  SWARM BUDGET CAP CONFIGURATION\n\nOverall Task: '{TUI_MACRO_GOAL}'\n\nRecommended Active Agent Budget Cap: {TUI_RECOMMENDED_CAP}\n\nThis cap restricts the number of concurrently active agents exploring options.\nIf active count exceeds the cap, warning and productivity rankings will trigger.\n\nType 'y' or press enter in the console below to confirm the recommended cap,\nor enter a custom integer.", style="white"), title="Swarm Budget Cap Configuration", border_style="yellow")
+    elif TUI_STATE == "DESIGNER":
+        return make_designer_center_panel(TUI_MACRO_GOAL)
+    elif TUI_STATE == "DECOMPOSING_AGENTS":
+        return Panel(Align.center(Text(f"\n\n\n⏳ Decomposing agent goals & registering tasks...\n\nDecomposing Agent {TUI_DECOMPOSE_PROGRESS['agent_id']} ({TUI_DECOMPOSE_PROGRESS['agent_role']}): {TUI_DECOMPOSE_PROGRESS['current']}/{TUI_DECOMPOSE_PROGRESS['total']}\n\nPlease wait...", style="bold yellow")), title="Agent Goals Decomposition", border_style="yellow")
+        
+    if current_view == "help":
+        help_table = Table(title="Interactive Swarm Terminal CLI Commands", show_lines=True, expand=True)
+        help_table.add_column("Command", style="bold green", width=25)
+        help_table.add_column("Description", style="white")
+        help_table.add_row("/help", "Show this help view in the main window.")
+        help_table.add_row("/add-agent <role> : <goal>", "Predefine custom agent role and sub-goal for the swarm.")
+        help_table.add_row("/view <combined/id/memory/help>", "Switch between Combined tree synthesis, a specific Agent's files, episodic memory database, or help menu.")
+        help_table.add_row("/clean [target]", "Clean specific files/folders. Target can be: logs, workspaces, collisions, tombstones, tasks, memory, all.")
+        help_table.add_row("/memory", "Display the sqlite episodic memory database of past runs.")
+        help_table.add_row("/trace <agent_id>", "Display visual Mermaid flowchart and chronological event timeline for the agent.")
+        help_table.add_row("/budget <n>", "Set output token budget cap limit dynamically.")
+        help_table.add_row("/prune <agent_id>", "Manually terminate a leaf agent unit and register its tombstone.")
+        help_table.add_row("/approve <agent_id>", "Approve a pending child agent spawn request.")
+        help_table.add_row("/reject <agent_id>", "Reject a pending child agent spawn request.")
+        help_table.add_row("/resolve <agent_id> <1|2|3>", "Resolve a pending agent blocker: 1=Workaround, 2=Bypass, 3=Kill.")
+        help_table.add_row("/exit", "Exit the TUI Dashboard.")
+        return Panel(help_table, title="Help & Commands Reference", border_style="cyan")
+    
+    elif current_view == "memory":
+        rows = []
+        try:
+            import memory_store
+            conn = memory_store.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, goal, role, status, reflection, created_at FROM episodic_memories ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            conn.close()
+        except Exception:
+            pass
+            
+        mem_table = Table(title="Historical Swarm Episodic Memory Archives", show_lines=True, expand=True)
+        mem_table.add_column("ID", justify="center", style="bold white", width=6)
+        mem_table.add_column("Goal", style="cyan")
+        mem_table.add_column("Role", style="green")
+        mem_table.add_column("Status", justify="center")
+        mem_table.add_column("Reflection", style="magenta")
+        mem_table.add_column("Date", justify="center")
+        
+        for r in rows:
+            status_colored = f"[bold green]{r['status']}[/bold green]" if r['status'] == 'completed' else f"[bold red]{r['status']}[/bold red]"
+            mem_table.add_row(
+                str(r["id"]),
+                r["goal"],
+                r["role"] or "",
+                status_colored,
+                r["reflection"] or "",
+                r["created_at"]
+            )
+        return Panel(mem_table, title="Episodic Memory Database", border_style="cyan")
+
+    elif current_view == "combined":
         content = generate_combined_synthesis()
         # Truncate content to avoid terminal overflow
         lines = content.splitlines()
@@ -833,12 +1055,12 @@ def make_tombstones_panel():
 def recommend_budget_cap(query):
     """Query Ollama to recommend a budget cap based on task complexity."""
     if not is_ollama_running():
-        return 4
+        return 20000
         
     prompt = (
         f"You are the Swarm Architect. Analyze the following macro task query:\n"
         f"Query: '{query}'\n\n"
-        f"Based on the complexity and scope of this task, recommend an active agent budget cap (integer limit, recommended range 2 to 8).\n"
+        f"Based on the complexity and scope of this task, recommend an active leaf agent output token budget cap limit (integer limit, recommended range 5000 to 50000 tokens).\n"
         f"Return strictly a JSON object with a single key 'recommended_cap' (integer).\n"
         f"Do not include markdown code fences or explanations outside the JSON."
     )
@@ -851,11 +1073,46 @@ def recommend_budget_cap(query):
                 return int(data["recommended_cap"])
         except Exception:
             pass
-    return 4
+    return 20000
 
 
-def make_budget_alert_panel():
+def make_budget_alert_panel(prompt_state=None):
     """Renders the swarm budget alert and pending decisions panel."""
+    if TUI_STATE in ["DESIGNER", "DECOMPOSING_MACRO", "BUDGET_CONFIRM", "DECOMPOSING_AGENTS"]:
+        return Panel(Text("\nAlerts panel inactive during configuration.", style="dim white"), title="Alerts & Pending Decisions (Inactive)", border_style="dim white")
+
+    if prompt_state and prompt_state.get("mode"):
+        mode = prompt_state["mode"]
+        aid = prompt_state["agent_id"]
+        content = Text()
+        if mode == "spawn":
+            req = prompt_state["spawn_req"]
+            content.append("🛰️  PENDING SPAWN APPROVAL\n", style="bold yellow")
+            content.append(f"   Agent ID:       {aid}\n", style="bold cyan")
+            content.append(f"   Goal/Sub-task:  {req.get('goal')}\n", style="white")
+            content.append(f"   Reason:         {req.get('reason', 'No reason specified')}\n", style="white")
+            content.append(f"   Initial Files:  {', '.join(req.get('initial_files', []))}\n", style="white")
+            content.append("\nType 'y' (approve) or 'n' (reject) in the terminal,", style="italic dim white")
+            content.append(f"\nor run: /approve {aid} or /reject {aid}", style="bold green")
+            return Panel(content, title="Action Required", border_style="yellow")
+        elif mode in ["blocker_choice", "blocker_workaround"]:
+            blk = prompt_state["blocker_details"]
+            content.append("⚠️  SUPERVISOR BLOCKER REVIEW MODE\n", style="bold red")
+            content.append(f"   Agent ID:       {aid}\n", style="bold cyan")
+            content.append(f"   Blocked File:   {blk.get('file_path')}\n", style="white")
+            content.append(f"   Blocked Tool:   {blk.get('tool_used')}\n", style="white")
+            content.append(f"   Error Message:  {blk.get('error_message')}\n", style="yellow")
+            if mode == "blocker_choice":
+                content.append("\n   Resolution Options:\n", style="bold white")
+                content.append("     1. Provide manual workaround\n", style="white")
+                content.append("     2. Override and bypass step\n", style="white")
+                content.append("     3. Kill the agent\n", style="white")
+                content.append("\nEnter 1, 2, or 3 in the terminal at the bottom,", style="italic dim white")
+                content.append(f"\nor run: /resolve {aid} <1|2|3>", style="bold green")
+            else:
+                content.append("\nEnter manual workaround details in the terminal at the bottom.", style="italic dim white")
+            return Panel(content, title="Action Required", border_style="red")
+
     alert_file = os.path.join(STATE_DIR, "budget_alert.json")
     
     pending_spawns = []
@@ -868,9 +1125,9 @@ def make_budget_alert_panel():
                         data = json.load(f)
                     aid = data.get("id")
                     if data.get("spawn_request", {}).get("status") == "pending":
-                        pending_spawns.append((aid, data["spawn_request"].get("goal")))
+                        pending_spawns.append((aid, data["spawn_request"].get("goal"), data["spawn_request"].get("reason", "Accelerate sub-task execution.")))
                     if data.get("status") == "pending_termination" and data.get("blocker_details"):
-                        pending_blockers.append((aid, data["blocker_details"].get("error_message")))
+                        pending_blockers.append((aid, data["blocker_details"]))
                 except Exception:
                     pass
 
@@ -894,25 +1151,31 @@ def make_budget_alert_panel():
     
     # 1. Render Swarm Budget Status
     if budget_exceeded:
-        content.append("⚠️  BUDGET ALERT: Active Agents Limit Exceeded!\n", style="bold red")
-        content.append(f"   Active Agents Count: {active_count}  |  Budget Cap: {budget_limit}\n", style="yellow")
+        content.append("⚠️  BUDGET ALERT: Output Token Limit Exceeded!\n", style="bold red")
+        content.append(f"   Max Leaf Output Tokens: {active_count}  |  Budget Cap: {budget_limit}\n", style="yellow")
         content.append("   Ranked Leaf Pruning Candidates (Least to Most Productive):\n", style="bold white")
         for idx, c in enumerate(candidates):
             content.append(f"     [{idx+1}] Agent {c['id']}: ", style="bold cyan")
             content.append(f"{c.get('reason', 'No explanation')}\n", style="white")
     else:
-        # Load actual active count
-        active_count_real = 0
+        # Load actual active leaf max output tokens
+        max_leaf_tokens_real = 0
         if os.path.exists(AGENTS_DIR):
+            active_agents = []
             for filename in os.listdir(AGENTS_DIR):
                 if filename.endswith(".json"):
                     try:
                         with open(os.path.join(AGENTS_DIR, filename), 'r') as f:
                             data = json.load(f)
                         if data.get("status") in ["exploring", "syncing", "pending_termination"]:
-                            active_count_real += 1
+                            active_agents.append(data)
                     except Exception:
                         pass
+            parent_ids = {a.get("parent_id") for a in active_agents if a.get("parent_id")}
+            leaf_agents = [a for a in active_agents if a["id"] not in parent_ids]
+            if leaf_agents:
+                max_leaf_tokens_real = max(a.get("output_tokens", 0) for a in leaf_agents)
+                
         # Try to read session budget limit
         global session_budget
         limit_val = session_budget
@@ -926,17 +1189,30 @@ def make_budget_alert_panel():
             except Exception:
                 pass
         content.append("✅  BUDGET STATUS: Swarm within bounds.\n", style="bold green")
-        content.append(f"   Active Agents Count: {active_count_real}  |  Budget Cap: {limit_val}\n", style="dim white")
+        content.append(f"   Max Leaf Output Tokens: {max_leaf_tokens_real}  |  Budget Cap: {limit_val}\n", style="dim white")
 
     # 2. Render Pending Actions
     if pending_spawns or pending_blockers:
         content.append("\n⚡  PENDING INTERACTIVE DECISIONS:\n", style="bold yellow")
-        for aid, goal in pending_spawns:
+        for aid, goal, reason in pending_spawns:
             content.append(f"   • Agent {aid}: ", style="bold cyan")
-            content.append(f"Pending Spawn Approval for goal '{goal[:40]}...'\n", style="white")
-        for aid, err in pending_blockers:
+            content.append(f"Pending Spawn Approval for goal '{goal}'.\n", style="white")
+            content.append(f"     Reason: '{reason}'\n", style="dim white")
+            content.append(f"     Run Command: ", style="dim green")
+            content.append(f"/approve {aid}", style="bold green")
+            content.append(" or ")
+            content.append(f"/reject {aid}\n", style="bold red")
+        for aid, blk in pending_blockers:
             content.append(f"   • Agent {aid}: ", style="bold red")
-            content.append(f"Pending Blocker Action: {err[:40]}...\n", style="white")
+            content.append(f"Blocked on file '{blk.get('file_path')}' using tool '{blk.get('tool_used')}'\n", style="white")
+            content.append(f"     Error: {blk.get('error_message')}\n", style="yellow")
+            content.append(f"     Run Command: ", style="dim green")
+            content.append(f"/resolve {aid} 1", style="bold green")
+            content.append(" (Workaround), ")
+            content.append(f"/resolve {aid} 2", style="bold green")
+            content.append(" (Bypass), or ")
+            content.append(f"/resolve {aid} 3", style="bold red")
+            content.append(" (Kill)\n")
     else:
         content.append("\n💤  No interactive decisions pending.", style="dim white")
 
@@ -1056,6 +1332,57 @@ def make_logs_panel():
         log_text.append("Waiting for supervisor logs...\n", style="dim white")
         
     return Panel(log_text, title="Supervisor Console Logs", border_style="cyan")
+
+
+def make_input_panel(input_buffer, prompt_state):
+    """Renders the inline terminal input panel at the bottom of the TUI."""
+    msg = prompt_state.get("error_msg")
+    if msg:
+        return Panel(Text.from_markup(msg), title="Terminal Status", border_style="cyan")
+        
+    mode = prompt_state.get("mode")
+    panel_text = Text()
+    
+    if TUI_STATE == "DECOMPOSING_MACRO":
+        panel_text.append("Decomposing macro task... please wait ┃", style="bold yellow")
+        return Panel(panel_text, title="PROCESSING", border_style="yellow")
+    elif TUI_STATE == "BUDGET_CONFIRM":
+        panel_text.append(f"Confirm recommended budget cap of {TUI_RECOMMENDED_CAP}? [Y/n] or enter custom cap > ", style="bold yellow")
+        panel_text.append(input_buffer, style="white")
+        panel_text.append("┃", style="bold yellow")
+        return Panel(panel_text, title="BUDGET CONFIGURATION", border_style="yellow")
+    elif TUI_STATE == "DESIGNER":
+        panel_text.append("Swarm Designer (Commands: /run | /add | /remove | /edit | /cancel) > ", style="bold green")
+        panel_text.append(input_buffer, style="white")
+        panel_text.append("┃", style="bold green")
+        return Panel(panel_text, title="SWARM DESIGNER", border_style="green")
+    elif TUI_STATE == "DECOMPOSING_AGENTS":
+        panel_text.append("Decomposing agent goals... please wait ┃", style="bold yellow")
+        return Panel(panel_text, title="PROCESSING", border_style="yellow")
+        
+    if mode == "spawn":
+        aid = prompt_state["agent_id"]
+        panel_text.append(f"Approve spawn for Agent {aid}? [y/n] > ", style="bold yellow")
+        panel_text.append(input_buffer, style="white")
+        panel_text.append("┃", style="bold yellow")
+        return Panel(panel_text, title="SPAWN APPROVAL REQUIRED", border_style="yellow")
+    elif mode == "blocker_choice":
+        aid = prompt_state["agent_id"]
+        panel_text.append(f"Select Blocker Resolution (1/2/3) > ", style="bold red")
+        panel_text.append(input_buffer, style="white")
+        panel_text.append("┃", style="bold red")
+        return Panel(panel_text, title="BLOCKER ENCOUNTERED", border_style="red")
+    elif mode == "blocker_workaround":
+        aid = prompt_state["agent_id"]
+        panel_text.append("Enter workaround details > ", style="bold yellow")
+        panel_text.append(input_buffer, style="white")
+        panel_text.append("┃", style="bold yellow")
+        return Panel(panel_text, title="ENTER WORKAROUND", border_style="yellow")
+    else:
+        panel_text.append("> ", style="bold cyan")
+        panel_text.append(input_buffer, style="white")
+        panel_text.append("┃", style="bold cyan")
+        return Panel(panel_text, title="Interactive Swarm Terminal (Commands: /budget <n> | /prune <id> | /exit)", border_style="cyan")
 
 
 # Ollama Connection Helper
@@ -1325,6 +1652,7 @@ def register_dynamic_task(task_id, goal, steps):
 
 
 def execute_dashboard_run(layout, supervisor_cmd):
+
     # Launch supervisor subprocess
     sup_proc = subprocess.Popen(supervisor_cmd)
     is_interactive = "--interactive" in supervisor_cmd
@@ -1333,21 +1661,27 @@ def execute_dashboard_run(layout, supervisor_cmd):
         from datetime import timezone
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         
+    input_buffer = ""
+    prompt_state = {
+        "mode": None,          # 'spawn', 'blocker_choice', 'blocker_workaround', or None
+        "agent_id": None,
+        "agent_filepath": None,
+        "spawn_req": None,
+        "blocker_details": None,
+        "error_msg": None,
+        "msg_timer": 0.0
+    }
+
     # Live loop updating layout components
     try:
         with Live(layout, refresh_per_second=5, screen=True) as live:
             while sup_proc.poll() is None:
-                layout["header"].update(make_header_panel())
-                layout["left"].update(make_agents_table())
-                layout["center"].update(make_output_panel())
-                layout["right_top"].update(make_collisions_panel())
-                layout["right_middle"].update(make_budget_alert_panel())
-                layout["right_bottom"].update(make_tombstones_panel())
-                layout["footer"].update(make_logs_panel())
+                # 1. Update status/error message timer
+                if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
+                    prompt_state["error_msg"] = None
                 
-                # Check for interactive approvals
-                if is_interactive:
-                    prompt_triggered = False
+                # 2. Check for interactive prompts if in interactive mode and no prompt is active
+                if is_interactive and prompt_state["mode"] is None:
                     if os.path.exists(AGENTS_DIR):
                         for filename in os.listdir(AGENTS_DIR):
                             if filename.endswith(".json"):
@@ -1358,186 +1692,378 @@ def execute_dashboard_run(layout, supervisor_cmd):
                                 except Exception:
                                     continue
                                     
-                                # 1. Check for spawn request
+                                # Check for spawn request
                                 spawn_req = data.get("spawn_request")
                                 if spawn_req and spawn_req.get("status") == "pending":
-                                    live.stop()
-                                    os.system("clear")
-                                    print("\n" + "="*60)
-                                    print("           🛰️  SPAWN REQUEST APPROVAL REQUIREMENT  🛰️")
-                                    print("="*60)
-                                    print(f"Agent ID:       {data.get('id')}")
-                                    print(f"Goal/Sub-task:  {spawn_req.get('goal')}")
-                                    print(f"Initial Files:  {', '.join(spawn_req.get('initial_files', []))}")
-                                    print("-"*60)
-                                    
-                                    try:
-                                        import termios
-                                        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-                                    except Exception:
-                                        pass
-                                        
-                                    ans = input("Approve spawning this child agent? [y/N]: ").strip().lower()
-                                    if ans in ["y", "yes"]:
-                                        spawn_req["status"] = "approved"
-                                        print("\n[+] Spawn request APPROVED.")
-                                    else:
-                                        spawn_req["status"] = "rejected"
-                                        print("\n[-] Spawn request REJECTED.")
-                                        
-                                    data["spawn_request"] = spawn_req
-                                    save_json(filepath, data)
-                                    time.sleep(1.0)
-                                    prompt_triggered = True
-                                    live.start()
+                                    prompt_state.update({
+                                        "mode": "spawn",
+                                        "agent_id": data.get("id"),
+                                        "agent_filepath": filepath,
+                                        "spawn_req": spawn_req
+                                    })
                                     break
                                     
-                                # 2. Check for pending_termination due to blocker_details
+                                # Check for pending_termination due to blocker_details
                                 status = data.get("status")
                                 blocker = data.get("blocker_details")
                                 if status == "pending_termination" and blocker:
-                                    live.stop()
-                                    os.system("clear")
-                                    print("\n" + "="*60)
-                                    print("         🛰️  SUPERVISOR BLOCKER REVIEW MODE  🛰️")
-                                    print("="*60)
-                                    print(f"Agent ID:       {data.get('id')}")
-                                    print(f"Current Goal:   {data.get('goal')}")
-                                    print(f"Blocked File:   {blocker.get('file_path')}")
-                                    print(f"Blocked Tool:   {blocker.get('tool_used')}")
-                                    print(f"Error Message:  {blocker.get('error_message')}")
-                                    print("-"*60)
-                                    print("Select Resolution Action:")
-                                    print("  1. Provide a manual workaround (text string)")
-                                    print("  2. Override and bypass (mark step completed)")
-                                    print("  3. Kill the agent (terminate execution)")
-                                    print("-"*60)
-                                    
+                                    prompt_state.update({
+                                        "mode": "blocker_choice",
+                                        "agent_id": data.get("id"),
+                                        "agent_filepath": filepath,
+                                        "blocker_details": blocker
+                                    })
+                                    break
+
+                # Verify prompt state validity (in case file state changes externally)
+                if prompt_state["mode"] is not None:
+                    filepath = prompt_state["agent_filepath"]
+                    if not os.path.exists(filepath):
+                        prompt_state["mode"] = None
+                    else:
+                        try:
+                            with open(filepath, 'r') as f:
+                                data = json.load(f)
+                            if prompt_state["mode"] == "spawn":
+                                spawn_req = data.get("spawn_request")
+                                if not spawn_req or spawn_req.get("status") != "pending":
+                                    prompt_state["mode"] = None
+                            elif prompt_state["mode"] in ["blocker_choice", "blocker_workaround"]:
+                                status = data.get("status")
+                                blocker = data.get("blocker_details")
+                                if status != "pending_termination" or not blocker:
+                                    prompt_state["mode"] = None
+                        except Exception:
+                            pass
+
+                # Update panels
+                layout["header"].update(make_header_panel())
+                layout["left"].update(make_agents_table())
+                layout["center"].update(make_output_panel())
+                layout["right_top"].update(make_collisions_panel())
+                layout["right_middle"].update(make_budget_alert_panel(prompt_state))
+                layout["right_bottom"].update(make_tombstones_panel())
+                layout["footer_logs"].update(make_logs_panel())
+                layout["footer_input"].update(make_input_panel(input_buffer, prompt_state))
+
+                # 3. Read input char-by-char non-blocking
+                import select
+                import sys
+                try:
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if rlist:
+                        # Character is ready, read in raw mode
+                        import tty
+                        import termios
+                        fd = sys.stdin.fileno()
+                        old_settings = termios.tcgetattr(fd)
+                        try:
+                            tty.setraw(fd)
+                            ch = sys.stdin.read(1)
+                        finally:
+                            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                            
+                        # Clear error/success message immediately when user types
+                        if prompt_state["error_msg"]:
+                            prompt_state["error_msg"] = None
+                            
+                        # Handle character
+                        if ch == '\x03':  # Ctrl+C
+                            raise KeyboardInterrupt
+                        elif ch in ('\r', '\n'):  # Enter
+                            cmd_line = input_buffer.strip()
+                            input_buffer = ""
+                            
+                            # Handle active prompts
+                            if prompt_state["mode"] == "spawn":
+                                filepath = prompt_state["agent_filepath"]
+                                spawn_req = prompt_state["spawn_req"]
+                                if cmd_line.lower() in ["y", "yes", "approve"]:
+                                    spawn_req["status"] = "approved"
                                     try:
-                                        import termios
-                                        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-                                    except Exception:
-                                        pass
-                                        
-                                    choice = ""
-                                    while choice not in ["1", "2", "3"]:
-                                        choice = input("Enter choice (1, 2, or 3): ").strip()
-                                        
-                                    if choice == "1":
-                                        workaround = input("Enter manual workaround details: ").strip()
-                                        if workaround:
-                                            tombstones = load_json(TOMBSTONES_FILE) or []
-                                            tombstones.append({
-                                                "file_path": blocker.get("file_path", "unknown"),
-                                                "tool_used": blocker.get("tool_used", "unknown"),
-                                                "error_message": blocker.get("error_message", "unknown"),
-                                                "fix_action": workaround,
-                                                "timestamp": get_iso_timestamp()
-                                            })
-                                            save_json(TOMBSTONES_FILE, tombstones)
-                                            print(f"\n[+] Registered workaround: '{workaround}'")
-                                        data["status"] = "exploring"
-                                        data["blocker_details"] = None
-                                        save_json(filepath, data)
-                                    elif choice == "2":
-                                        data["steps_completed"] += 1
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["spawn_request"] = spawn_req
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold green][+] Spawn APPROVED for Agent {prompt_state['agent_id']}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                elif cmd_line.lower() in ["n", "no", "reject"]:
+                                    spawn_req["status"] = "rejected"
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["spawn_request"] = spawn_req
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold yellow][-] Spawn REJECTED for Agent {prompt_state['agent_id']}[/bold yellow]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Invalid option. Type y or n.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                            elif prompt_state["mode"] == "blocker_choice":
+                                if cmd_line == "1":
+                                    prompt_state["mode"] = "blocker_workaround"
+                                elif cmd_line == "2":
+                                    filepath = prompt_state["agent_filepath"]
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["steps_completed"] += 1
                                         tasks_data = load_json(MOCK_TASKS_FILE)
-                                        task_id = data.get("task_id")
+                                        task_id = agent_data.get("task_id")
                                         if tasks_data and task_id in tasks_data.get("tasks", {}):
                                             steps = tasks_data["tasks"][task_id].get("steps", [])
-                                            data["progress"] = int((data["steps_completed"] / len(steps)) * 100)
-                                            if data["steps_completed"] < len(steps):
-                                                next_step = steps[data["steps_completed"]]
-                                                data["current_step"] = {
+                                            agent_data["progress"] = int((agent_data["steps_completed"] / len(steps)) * 100)
+                                            if agent_data["steps_completed"] < len(steps):
+                                                next_step = steps[agent_data["steps_completed"]]
+                                                agent_data["current_step"] = {
                                                     "step_id": next_step["step_id"],
                                                     "name": next_step["name"],
                                                     "description": next_step["description"]
                                                 }
                                             else:
-                                                data["status"] = "completed"
-                                                data["current_step"] = None
-                                        if data["status"] != "completed":
-                                            data["status"] = "exploring"
-                                        data["blocker_details"] = None
-                                        save_json(filepath, data)
-                                        print("\n[+] Step bypassed. Resuming agent.")
-                                    elif choice == "3":
-                                        data["status"] = "dead"
-                                        data["blocker_details"] = None
-                                        save_json(filepath, data)
-                                        print("\n[-] Agent terminated.")
-                                        
-                                    time.sleep(1.0)
-                                    prompt_triggered = True
-                                    live.start()
-                                    break
-                        if prompt_triggered:
-                            continue
-                            
-                time.sleep(0.2)
-                
-                # Non-blocking check for interactive dashboard commands
-                import select
-                rlist, _, _ = select.select([sys.stdin], [], [], 0.0)
-                if rlist:
-                    live.stop()
-                    try:
-                        import termios
-                        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-                    except Exception:
-                        pass
-                    
-                    print("\n\033[1;33m[Interactive Dashboard Command Mode]\033[0m")
-                    print("Available commands:")
-                    print("  /budget <new_cap>        - Dynamically adjust the budget cap")
-                    print("  /prune <agent_id>        - Safely terminate an active leaf agent")
-                    print("  Press Enter to return to live dashboard")
-                    cmd_line = input("> ").strip()
-                    if cmd_line:
-                        parts = cmd_line.split(maxsplit=1)
-                        cmd = parts[0].lower() if parts else ""
-                        arg = parts[1] if len(parts) > 1 else None
-                        
-                        if cmd == "/budget":
-                            if not arg or not arg.isdigit():
-                                print("[-] Error: Usage: /budget <new_cap>")
-                            else:
-                                cap = int(arg)
-                                global session_budget
-                                session_budget = cap
-                                orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
-                                if os.path.exists(orchestrator_file):
-                                    try:
-                                        orc_state = load_json(orchestrator_file) or {}
-                                        orc_state["budget_limit"] = cap
-                                        save_json(orchestrator_file, orc_state)
-                                        print(f"[+] Budget cap updated dynamically to {cap}")
+                                                agent_data["status"] = "completed"
+                                                agent_data["current_step"] = None
+                                        if agent_data["status"] != "completed":
+                                            agent_data["status"] = "exploring"
+                                        agent_data["blocker_details"] = None
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold green][+] Blocker bypassed for Agent {prompt_state['agent_id']}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
                                     except Exception as e:
-                                        print(f"[-] Error updating budget: {e}")
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                    
+                                elif cmd_line == "3":
+                                    filepath = prompt_state["agent_filepath"]
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["status"] = "dead"
+                                        agent_data["blocker_details"] = None
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold red][-] Agent {prompt_state['agent_id']} terminated[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
                                 else:
-                                    print("[-] Error: orchestrator.json not found")
-                        elif cmd == "/prune":
-                            if not arg:
-                                print("[-] Error: Usage: /prune <agent_id>")
+                                    prompt_state["error_msg"] = "[bold red][-] Invalid option. Enter 1, 2, or 3.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                            elif prompt_state["mode"] == "blocker_workaround":
+                                if cmd_line:
+                                    filepath = prompt_state["agent_filepath"]
+                                    blocker = prompt_state["blocker_details"]
+                                    try:
+                                        tombstones = load_json(TOMBSTONES_FILE) or []
+                                        tombstones.append({
+                                            "file_path": blocker.get("file_path", "unknown"),
+                                            "tool_used": blocker.get("tool_used", "unknown"),
+                                            "error_message": blocker.get("error_message", "unknown"),
+                                            "fix_action": cmd_line,
+                                            "timestamp": get_iso_timestamp()
+                                        })
+                                        save_json(TOMBSTONES_FILE, tombstones)
+                                        
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["status"] = "exploring"
+                                        agent_data["blocker_details"] = None
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold green][+] Workaround registered for Agent {prompt_state['agent_id']}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Workaround cannot be empty.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
                             else:
-                                agent_id = arg.strip().zfill(3)
-                                success, msg = handle_dashboard_pruning(agent_id)
-                                if success:
-                                    print(f"[+] {msg}")
-                                else:
-                                    print(f"[-] {msg}")
+                                # Normal Command parsing
+                                if cmd_line:
+                                    parts = cmd_line.split(maxsplit=1)
+                                    cmd = parts[0].lower()
+                                    arg = parts[1] if len(parts) > 1 else None
+                                    
+                                    if cmd in ["/exit", "/quit"]:
+                                        raise KeyboardInterrupt
+                                    elif cmd == "/budget":
+                                        if not arg or not arg.isdigit():
+                                            prompt_state["error_msg"] = "[bold red][-] Usage: /budget <new_cap>[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                        else:
+                                            cap = int(arg)
+                                            global session_budget
+                                            session_budget = cap
+                                            orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+                                            if os.path.exists(orchestrator_file):
+                                                try:
+                                                    orc_state = load_json(orchestrator_file) or {}
+                                                    orc_state["budget_limit"] = cap
+                                                    save_json(orchestrator_file, orc_state)
+                                                    prompt_state["error_msg"] = f"[bold green][+] Budget updated dynamically to {cap}[/bold green]"
+                                                    prompt_state["msg_timer"] = time.time()
+                                                except Exception as e:
+                                                    prompt_state["error_msg"] = f"[bold red][-] Error updating budget: {e}[/bold red]"
+                                                    prompt_state["msg_timer"] = time.time()
+                                            else:
+                                                prompt_state["error_msg"] = "[bold red][-] Error: orchestrator.json not found[/bold red]"
+                                    elif cmd == "/prune":
+                                        if not arg:
+                                            prompt_state["error_msg"] = "[bold red][-] Usage: /prune <agent_id>[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                        else:
+                                            agent_id = arg.strip().zfill(3)
+                                            success, msg = handle_dashboard_pruning(agent_id)
+                                            if success:
+                                                prompt_state["error_msg"] = f"[bold green][+] {msg}[/bold green]"
+                                                prompt_state["msg_timer"] = time.time()
+                                            else:
+                                                prompt_state["error_msg"] = f"[bold red][-] {msg}[/bold red]"
+                                                prompt_state["msg_timer"] = time.time()
+                                    elif cmd == "/approve":
+                                        if not arg:
+                                            prompt_state["error_msg"] = "[bold red][-] Usage: /approve <agent_id>[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                        else:
+                                            target_aid = arg.strip().zfill(3)
+                                            filepath = os.path.join(AGENTS_DIR, f"agent_{target_aid}.json")
+                                            if os.path.exists(filepath):
+                                                try:
+                                                    with open(filepath, 'r') as f:
+                                                        agent_data = json.load(f)
+                                                    spawn_req = agent_data.get("spawn_request")
+                                                    if spawn_req and spawn_req.get("status") == "pending":
+                                                        spawn_req["status"] = "approved"
+                                                        agent_data["spawn_request"] = spawn_req
+                                                        save_json(filepath, agent_data)
+                                                        prompt_state["error_msg"] = f"[bold green][+] Spawn APPROVED for Agent {target_aid}[/bold green]"
+                                                    else:
+                                                        prompt_state["error_msg"] = f"[bold red][-] No pending spawn request for Agent {target_aid}[/bold red]"
+                                                except Exception as e:
+                                                    prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                            else:
+                                                prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} not found[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                    elif cmd == "/reject":
+                                        if not arg:
+                                            prompt_state["error_msg"] = "[bold red][-] Usage: /reject <agent_id>[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                        else:
+                                            target_aid = arg.strip().zfill(3)
+                                            filepath = os.path.join(AGENTS_DIR, f"agent_{target_aid}.json")
+                                            if os.path.exists(filepath):
+                                                try:
+                                                    with open(filepath, 'r') as f:
+                                                        agent_data = json.load(f)
+                                                    spawn_req = agent_data.get("spawn_request")
+                                                    if spawn_req and spawn_req.get("status") == "pending":
+                                                        spawn_req["status"] = "rejected"
+                                                        agent_data["spawn_request"] = spawn_req
+                                                        save_json(filepath, agent_data)
+                                                        prompt_state["error_msg"] = f"[bold yellow][-] Spawn REJECTED for Agent {target_aid}[/bold yellow]"
+                                                    else:
+                                                        prompt_state["error_msg"] = f"[bold red][-] No pending spawn request for Agent {target_aid}[/bold red]"
+                                                except Exception as e:
+                                                    prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                            else:
+                                                prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} not found[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                    elif cmd == "/resolve":
+                                        subparts = arg.strip().split() if arg else []
+                                        if len(subparts) < 2:
+                                            prompt_state["error_msg"] = "[bold red][-] Usage: /resolve <agent_id> <1|2|3>[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                        else:
+                                            target_aid = subparts[0].zfill(3)
+                                            choice = subparts[1]
+                                            filepath = os.path.join(AGENTS_DIR, f"agent_{target_aid}.json")
+                                            if os.path.exists(filepath):
+                                                try:
+                                                    with open(filepath, 'r') as f:
+                                                        agent_data = json.load(f)
+                                                    status = agent_data.get("status")
+                                                    blocker = agent_data.get("blocker_details")
+                                                    if status == "pending_termination" and blocker:
+                                                        if choice == "1":
+                                                            prompt_state.update({
+                                                                "mode": "blocker_workaround",
+                                                                "agent_id": target_aid,
+                                                                "agent_filepath": filepath,
+                                                                "blocker_details": blocker
+                                                            })
+                                                            prompt_state["error_msg"] = f"[bold yellow][*] Enter manual workaround for Agent {target_aid} below...[/bold yellow]"
+                                                        elif choice == "2":
+                                                            tombstones = load_json(TOMBSTONES_FILE) or []
+                                                            tombstones.append({
+                                                                "file_path": blocker.get("file_path", "unknown"),
+                                                                "tool_used": blocker.get("tool_used", "unknown"),
+                                                                "error_message": blocker.get("error_message", "unknown"),
+                                                                "fix_action": "Bypassed by User command",
+                                                                "timestamp": get_iso_timestamp()
+                                                            })
+                                                            save_json(TOMBSTONES_FILE, tombstones)
+                                                            agent_data["status"] = "exploring"
+                                                            agent_data["blocker_details"] = None
+                                                            save_json(filepath, agent_data)
+                                                            prompt_state["error_msg"] = f"[bold green][+] Agent {target_aid} bypass recorded. Resuming...[/bold green]"
+                                                        elif choice == "3":
+                                                            success, msg = handle_dashboard_pruning(target_aid)
+                                                            if success:
+                                                                prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} pruned[/bold red]"
+                                                            else:
+                                                                prompt_state["error_msg"] = f"[bold red][-] {msg}[/bold red]"
+                                                        else:
+                                                            prompt_state["error_msg"] = "[bold red][-] Invalid choice. Must be 1, 2, or 3.[/bold red]"
+                                                    else:
+                                                        prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} is not blocked[/bold red]"
+                                                except Exception as e:
+                                                    prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                            else:
+                                                prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} not found[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        prompt_state["error_msg"] = f"[bold red][-] Unknown command: {cmd}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                        elif ch in ('\x7f', '\x08'):  # Backspace
+                            input_buffer = input_buffer[:-1]
+                        elif ch == '\x1b':  # Escape sequence
+                            r, _, _ = select.select([sys.stdin], [], [], 0.001)
+                            if r:
+                                sys.stdin.read(1)
+                                r, _, _ = select.select([sys.stdin], [], [], 0.001)
+                                if r:
+                                    sys.stdin.read(1)
                         else:
-                            print(f"[-] Unknown command: {cmd}")
-                        time.sleep(1.5)
-                    live.start()
-                    
+                            # Append printable characters
+                            if len(ch) == 1 and (32 <= ord(ch) <= 126):
+                                input_buffer += ch
+                except Exception:
+                    pass
+
+            # Update final state before loop exit check
             layout["header"].update(make_header_panel())
             layout["left"].update(make_agents_table())
             layout["center"].update(make_output_panel())
             layout["right_top"].update(make_collisions_panel())
-            layout["right_middle"].update(make_budget_alert_panel())
+            layout["right_middle"].update(make_budget_alert_panel(prompt_state))
             layout["right_bottom"].update(make_tombstones_panel())
-            layout["footer"].update(make_logs_panel())
+            layout["footer_logs"].update(make_logs_panel())
+            layout["footer_input"].update(make_input_panel(input_buffer, prompt_state))
             
     except KeyboardInterrupt:
         pass
@@ -1662,18 +2188,132 @@ def run_swarm_designer(initial_list, overall_query, layout=None):
     except Exception:
         pass
 
-    while True:
-        if layout:
-            os.system("clear")
-            layout["header"].update(make_header_panel())
-            layout["left"].update(make_designer_agents_table(current_agents))
-            layout["center"].update(make_designer_center_panel(overall_query))
-            layout["right_top"].update(make_designer_placeholder_panel("Collision Monitor (Inactive)"))
-            layout["right_middle"].update(make_designer_placeholder_panel("Alerts / Pending Decisions (Inactive)"))
-            layout["right_bottom"].update(make_designer_placeholder_panel("Tombstone Database (Inactive)"))
-            layout["footer"].update(make_designer_footer_panel())
-            console.print(layout)
-        else:
+    input_buffer = ""
+    prompt_state = {
+        "mode": None,
+        "error_msg": None,
+        "msg_timer": 0.0
+    }
+
+    if layout:
+        with Live(layout, refresh_per_second=5, screen=True) as live:
+            while True:
+                if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
+                    prompt_state["error_msg"] = None
+                    
+                layout["header"].update(make_header_panel())
+                layout["left"].update(make_designer_agents_table(current_agents))
+                layout["center"].update(make_designer_center_panel(overall_query))
+                layout["right_top"].update(make_designer_placeholder_panel("Collision Monitor (Inactive)"))
+                layout["right_middle"].update(make_designer_placeholder_panel("Alerts / Pending Decisions (Inactive)"))
+                layout["right_bottom"].update(make_designer_placeholder_panel("Tombstone Database (Inactive)"))
+                layout["footer_logs"].update(make_designer_footer_panel())
+                layout["footer_input"].update(make_input_panel(input_buffer, prompt_state))
+                
+                import select
+                try:
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if rlist:
+                        import tty
+                        import termios
+                        fd = sys.stdin.fileno()
+                        old_settings = termios.tcgetattr(fd)
+                        try:
+                            tty.setraw(fd)
+                            ch = sys.stdin.read(1)
+                        finally:
+                            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                            
+                        if prompt_state["error_msg"]:
+                            prompt_state["error_msg"] = None
+                            
+                        if ch == '\x03':
+                            raise KeyboardInterrupt
+                        elif ch in ('\r', '\n'):
+                            cmd_input = input_buffer.strip()
+                            input_buffer = ""
+                            if not cmd_input:
+                                continue
+                                
+                            parts = cmd_input.split(maxsplit=1)
+                            cmd = parts[0].lower()
+                            arg = parts[1] if len(parts) > 1 else None
+                            
+                            if cmd == "/run":
+                                if not current_agents:
+                                    prompt_state["error_msg"] = "[bold red][-] Error: Swarm cannot be empty.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                return current_agents
+                            elif cmd == "/cancel":
+                                return None
+                            elif cmd == "/add":
+                                if not arg:
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /add <role> : <goal>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                if ":" in arg:
+                                    r_part, g_part = arg.split(":", 1)
+                                    r = r_part.strip()
+                                    g = g_part.strip()
+                                else:
+                                    r = arg.strip()
+                                    g = None
+                                if r:
+                                    current_agents.append({"role": r, "goal": g})
+                                    prompt_state["error_msg"] = f"[bold green][+] Added agent: {r}[/bold green]"
+                                    prompt_state["msg_timer"] = time.time()
+                            elif cmd == "/remove":
+                                if not arg or not arg.isdigit():
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /remove <num>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                num = int(arg) - 1
+                                if 0 <= num < len(current_agents):
+                                    removed = current_agents.pop(num)
+                                    prompt_state["error_msg"] = f"[bold yellow][-] Removed agent: {removed['role']}[/bold yellow]"
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Error: Invalid agent number.[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                            elif cmd == "/edit":
+                                if not arg:
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /edit <num> role=<val> OR goal=<val>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                subparts = arg.split(maxsplit=1)
+                                if len(subparts) < 2 or not subparts[0].isdigit():
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /edit <num> role=<val> OR goal=<val>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                num = int(subparts[0]) - 1
+                                edit_arg = subparts[1]
+                                if 0 <= num < len(current_agents):
+                                    if "=" in edit_arg:
+                                        field, val = edit_arg.split("=", 1)
+                                        field = field.strip().lower()
+                                        val = val.strip()
+                                        if field in ["role", "goal"]:
+                                            current_agents[num][field] = val
+                                            prompt_state["error_msg"] = f"[bold green][+] Updated Agent {num+1} {field}.[/bold green]"
+                                        else:
+                                            prompt_state["error_msg"] = "[bold red][-] Field must be role or goal.[/bold red]"
+                                    else:
+                                        prompt_state["error_msg"] = "[bold red][-] Format: field=value.[/bold red]"
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Invalid agent number.[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                            else:
+                                prompt_state["error_msg"] = f"[bold red][-] Unknown designer command: {cmd}[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                        elif ord(ch) in (127, 8):
+                            input_buffer = input_buffer[:-1]
+                        elif len(ch) == 1 and (32 <= ord(ch) <= 126):
+                            input_buffer += ch
+                except select.error:
+                    pass
+                time.sleep(0.05)
+    else:
+        while True:
             os.system("clear")
             print("\n\033[1;33m" + "="*70)
             print("                🛰️  SWARM DESIGNER MODE  🛰️")
@@ -1697,114 +2337,130 @@ def run_swarm_designer(initial_list, overall_query, layout=None):
             print("  \033[1m/add <role> : <goal>\033[0m       - Add a new agent to the swarm")
             print("  \033[1m/remove <num>\033[0m              - Remove an agent from the swarm")
             print("  \033[1m/cancel\033[0m                    - Abort task and go back to main dashboard\n")
-        
-        # Flush stdin before prompting to prevent skipped input
+            
+            try:
+                import termios
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)
+            except Exception:
+                pass
+                
+            designer_prompt = "\033[1;32mSwarm Designer > \033[0m"
+            try:
+                cmd_input = input(designer_prompt).strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n[*] Swarm design cancelled.")
+                return None
+                
+            if not cmd_input:
+                continue
+                
+            parts = cmd_input.split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1] if len(parts) > 1 else None
+            
+            if cmd == "/run":
+                if not current_agents:
+                    print("\n\033[1;31m[-] Error: Cannot start an empty swarm. Please add agents first.\033[0m")
+                    time.sleep(1.5)
+                    continue
+                return current_agents
+            elif cmd == "/cancel":
+                return None
+            elif cmd == "/add":
+                if not arg:
+                    print("\n\033[1;31m[-] Error: Usage: /add <role> : <goal>\033[0m")
+                    time.sleep(1.5)
+                    continue
+                if ":" in arg:
+                    r_part, g_part = arg.split(":", 1)
+                    r = r_part.strip()
+                    g = g_part.strip()
+                else:
+                    r = arg.strip()
+                    g = None
+                if r:
+                    current_agents.append({"role": r, "goal": g})
+                    print(f"\n\033[1;32m[+] Added agent: {r}\033[0m")
+                else:
+                    print("\n\033[1;31m[-] Error: Agent role cannot be empty.\033[0m")
+                time.sleep(1.0)
+            elif cmd == "/remove":
+                if not arg or not arg.isdigit():
+                    print("\n\033[1;31m[-] Error: Usage: /remove <num>\033[0m")
+                    time.sleep(1.5)
+                    continue
+                num = int(arg) - 1
+                if 0 <= num < len(current_agents):
+                    removed = current_agents.pop(num)
+                    print(f"\n\033[1;32m[+] Removed agent {num+1}: {removed['role']}\033[0m")
+                else:
+                    print("\n\033[1;31m[-] Error: Invalid agent number.\033[0m")
+                time.sleep(1.0)
+            elif cmd == "/edit":
+                if not arg:
+                    print("\n\033[1;31m[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>\033[0m")
+                    time.sleep(2.0)
+                    continue
+                subparts = arg.split(maxsplit=1)
+                if len(subparts) < 2 or not subparts[0].isdigit():
+                    print("\n\033[1;31m[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>\033[0m")
+                    time.sleep(2.0)
+                    continue
+                num = int(subparts[0]) - 1
+                edit_arg = subparts[1]
+                if 0 <= num < len(current_agents):
+                    if "=" in edit_arg:
+                        field, val = edit_arg.split("=", 1)
+                        field = field.strip().lower()
+                        val = val.strip()
+                        if field == "role":
+                            current_agents[num]["role"] = val
+                            print(f"\n\033[1;32m[+] Updated Agent {num+1}'s role to: {val}\033[0m")
+                        elif field == "goal":
+                            current_agents[num]["goal"] = val
+                            print(f"\n\033[1;32m[+] Updated Agent {num+1}'s goal to: {val}\033[0m")
+                        else:
+                            print("\n\033[1;31m[-] Error: Field must be 'role' or 'goal'.\033[0m")
+                    else:
+                        print("\n\033[1;31m[-] Error: Format must be field=value.\033[0m")
+                else:
+                    print("\n\033[1;31m[-] Error: Invalid agent number.\033[0m")
+                time.sleep(1.5)
+            else:
+                print("\n\033[1;31m[-] Unknown designer command.\033[0m")
+                time.sleep(1.0)
+
+
+def cleanup_transient_session_state():
+    """Wipes the transient session state at TUI startup to ensure a clean boot."""
+    if os.path.exists(STATE_DIR):
         try:
-            import termios
-            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+            shutil.rmtree(STATE_DIR)
         except Exception:
             pass
             
-        if layout:
-            designer_prompt = "\n\033[1;33mSwarm Designer (Type '/run' to start) > \033[0m"
-        else:
-            designer_prompt = "\033[1;32mSwarm Designer > \033[0m"
-            
+    os.makedirs(STATE_DIR, exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(TOMBSTONES_FILE), exist_ok=True)
+        with open(TOMBSTONES_FILE, 'w') as f:
+            json.dump([], f, indent=2)
+    except Exception:
+        pass
+
+    if os.path.exists(MOCK_TASKS_FILE):
         try:
-            cmd_input = input(designer_prompt).strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\n[*] Swarm design cancelled.")
-            return None
-            
-        if not cmd_input:
-            continue
-            
-        parts = cmd_input.split(maxsplit=1)
-        cmd = parts[0].lower()
-        arg = parts[1] if len(parts) > 1 else None
-        
-        if cmd == "/run":
-            if not current_agents:
-                print("\n\033[1;31m[-] Error: Cannot start an empty swarm. Please add agents first.\033[0m" if layout else "[-] Error: Cannot start an empty swarm. Please add agents first.")
-                time.sleep(1.5)
-                continue
-            return current_agents
-            
-        elif cmd == "/cancel":
-            return None
-            
-        elif cmd == "/add":
-            if not arg:
-                print("\n\033[1;31m[-] Error: Usage: /add <role> : <goal>\033[0m" if layout else "[-] Error: Usage: /add <role> : <goal>")
-                time.sleep(1.5)
-                continue
-            if ":" in arg:
-                r_part, g_part = arg.split(":", 1)
-                r = r_part.strip()
-                g = g_part.strip()
-            else:
-                r = arg.strip()
-                g = None
-            if r:
-                current_agents.append({"role": r, "goal": g})
-                print(f"\n\033[1;32m[+] Added agent: {r}\033[0m" if layout else f"[+] Added agent: {r}")
-            else:
-                print("\n\033[1;31m[-] Error: Agent role cannot be empty.\033[0m" if layout else "[-] Error: Agent role cannot be empty.")
-            time.sleep(1.0)
-            
-        elif cmd == "/remove":
-            if not arg or not arg.isdigit():
-                print("\n\033[1;31m[-] Error: Usage: /remove <num>\033[0m" if layout else "[-] Error: Usage: /remove <num>")
-                time.sleep(1.5)
-                continue
-            num = int(arg) - 1
-            if 0 <= num < len(current_agents):
-                removed = current_agents.pop(num)
-                print(f"\n\033[1;32m[+] Removed agent {num+1}: {removed['role']}\033[0m" if layout else f"[+] Removed agent {num+1}: {removed['role']}")
-            else:
-                print("\n\033[1;31m[-] Error: Invalid agent number.\033[0m" if layout else "[-] Error: Invalid agent number.")
-            time.sleep(1.0)
-            
-        elif cmd == "/edit":
-            if not arg:
-                print("\n\033[1;31m[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>\033[0m" if layout else "[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>")
-                time.sleep(2.0)
-                continue
-            
-            subparts = arg.split(maxsplit=1)
-            if len(subparts) < 2 or not subparts[0].isdigit():
-                print("\n\033[1;31m[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>\033[0m" if layout else "[-] Error: Usage: /edit <num> role=<val> OR /edit <num> goal=<val>")
-                time.sleep(2.0)
-                continue
-                
-            num = int(subparts[0]) - 1
-            edit_arg = subparts[1]
-            
-            if 0 <= num < len(current_agents):
-                if "=" in edit_arg:
-                    field, val = edit_arg.split("=", 1)
-                    field = field.strip().lower()
-                    val = val.strip()
-                    if field == "role":
-                        current_agents[num]["role"] = val
-                        print(f"\n\033[1;32m[+] Updated Agent {num+1}'s role to: {val}\033[0m" if layout else f"[+] Updated Agent {num+1}'s role to: {val}")
-                    elif field == "goal":
-                        current_agents[num]["goal"] = val
-                        print(f"\n\033[1;32m[+] Updated Agent {num+1}'s goal to: {val}\033[0m" if layout else f"[+] Updated Agent {num+1}'s goal to: {val}")
-                    else:
-                        print("\n\033[1;31m[-] Error: Field must be 'role' or 'goal'.\033[0m" if layout else "[-] Error: Field must be 'role' or 'goal'.")
-                else:
-                    print("\n\033[1;31m[-] Error: Format must be field=value.\033[0m" if layout else "[-] Error: Format must be field=value.")
-            else:
-                print("\n\033[1;31m[-] Error: Invalid agent number.\033[0m" if layout else "[-] Error: Invalid agent number.")
-            time.sleep(1.5)
-            
-        else:
-            print("\n\033[1;31m[-] Unknown designer command.\033[0m" if layout else "[-] Unknown designer command.")
-            time.sleep(1.0)
+            with open(MOCK_TASKS_FILE, 'r') as f:
+                data = json.load(f)
+            if "tasks" in data:
+                data["tasks"] = {k: v for k, v in data["tasks"].items() if not k.startswith("task_dynamic_")}
+            with open(MOCK_TASKS_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
 
 def main():
+    cleanup_transient_session_state()
     parser = argparse.ArgumentParser(description="Proximity Swarm V2 - Terminal Monitor Dashboard")
     parser.add_argument("--run-redundant", action="store_true", help="Launch the identical goal collision demo")
     parser.add_argument("--task-id", help="Launch a custom task ID and monitor it")
@@ -1813,7 +2469,7 @@ def main():
     parser.add_argument("--step-delay", type=float, default=2.0, help="Agent runner step delay in seconds")
     parser.add_argument("--llm-provider", choices=["gemini", "ollama", "rules"], help="LLM API provider for deconfliction negotiation")
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model string to query if provider is ollama")
-    parser.add_argument("--budget", type=int, default=4, help="Active agent budget cap limit")
+    parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     args = parser.parse_args()
     
     global session_budget
@@ -1824,7 +2480,7 @@ def main():
     layout.split(
         Layout(name="header", size=3),
         Layout(name="body"),
-        Layout(name="footer", size=10)
+        Layout(name="footer", size=15)
     )
     layout["body"].split_row(
         Layout(name="left", ratio=5),
@@ -1835,6 +2491,10 @@ def main():
         Layout(name="right_top", ratio=1),
         Layout(name="right_middle", ratio=1),
         Layout(name="right_bottom", ratio=1)
+    )
+    layout["footer"].split(
+        Layout(name="footer_logs", ratio=2),
+        Layout(name="footer_input", size=5)
     )
     
     # Check if we should execute a single direct run (redundant demo or specific task)
@@ -1860,348 +2520,741 @@ def main():
         if session_budget:
             supervisor_cmd.extend(["--budget", str(session_budget)])
             
-        print(f"[Dashboard] Initializing simulation: {' '.join(supervisor_cmd)}...")
-        time.sleep(1.0)
+        global TUI_STATE, TUI_SUPERVISOR_CMD
+        TUI_STATE = "RUNNING"
+        TUI_SUPERVISOR_CMD = supervisor_cmd
         synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
-        execute_dashboard_run(layout, supervisor_cmd)
         
-        console.clear()
-        print("\n" + "="*50)
-        print("    Terminal Dashboard Session Terminated")
-        print("="*50 + "\n")
-        sys.exit(0)
+def run_swarm_workflow(user_input, layout, args):
+    # Decompose goal into sub-swarms first
+    orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+    os.makedirs(STATE_DIR, exist_ok=True)
+    
+    initial_swarm = []
+    if predefined_personalities:
+        for idx, entry in enumerate(predefined_personalities):
+            initial_swarm.append({
+                "role": entry["role"],
+                "goal": entry["goal"] or user_input,
+                "sub_swarm_id": "swarm_001"
+            })
+        orchestrator_state = {
+            "macro_goal": user_input,
+            "sub_swarms": {
+                "swarm_001": {
+                    "id": "swarm_001",
+                    "goal": user_input,
+                    "role": "Custom Swarm",
+                    "dependencies": [],
+                    "status": "pending",
+                    "agent_ids": []
+                }
+            }
+        }
+        save_json(orchestrator_file, orchestrator_state)
+    else:
+        write_to_monitor_log(f"No custom agents defined. Decomposing task into sub-swarms for: '{user_input}'...", "INFO")
+        with console.status("[bold yellow]Decomposing macro task into sub-swarms via Ollama...", spinner="dots"):
+            decomposition = decompose_macro_goal(user_input)
         
-    # Persistent Interactive TUI Dashboard Mode
-    while True:
-        try:
-            # 1. Redraw/render current state statically to terminal screen
-            os.system("clear")
+        sub_swarms_dict = {}
+        for s in decomposition["sub_swarms"]:
+            sub_swarms_dict[s["id"]] = {
+                "id": s["id"],
+                "goal": s["goal"],
+                "role": s["role"],
+                "dependencies": s["dependencies"],
+                "status": "pending",
+                "agent_ids": []
+            }
+            initial_swarm.append({
+                "role": s["role"],
+                "goal": s["goal"],
+                "sub_swarm_id": s["id"]
+            })
+            
+        orchestrator_state = {
+            "macro_goal": user_input,
+            "sub_swarms": sub_swarms_dict
+        }
+        save_json(orchestrator_file, orchestrator_state)
+    
+    # Enter Swarm Designer Mode to review/modify roles/goals
+    final_swarm = run_swarm_designer(initial_swarm, user_input, layout)
+    if final_swarm is None:
+        predefined_personalities.clear()
+        write_to_monitor_log("Swarm design cancelled by user.", "WARNING")
+        return
+        
+    # Decompose goals and register tasks
+    agents_config = []
+    now_ts = int(time.time())
+    
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console
+    ) as progress:
+        task_id_progress = progress.add_task("[yellow]Decomposing agent goals...", total=len(final_swarm))
+        
+        for idx, entry in enumerate(final_swarm):
+            agent_role = entry.get("role", "Generalist")
+            agent_goal = entry.get("goal") or user_input
+            agent_id = f"{idx+1:03d}"
+            agent_sub_swarm = entry.get("sub_swarm_id", "swarm_001")
+            
+            progress.update(task_id_progress, description=f"[yellow]Agent {agent_id} ({agent_role}): Decomposing goal...")
+            write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
+            
+            steps = generate_task_steps(agent_goal)
+            if not steps:
+                steps = [
+                    {
+                        "step_id": 1,
+                        "name": "General Execution",
+                        "description": f"Perform tasks for: {agent_goal}",
+                        "touched_files": [f"src/agent_{agent_id}_output.md"],
+                        "tools": ["edit_file"]
+                    }
+                ]
+            
+            task_id = f"task_dynamic_{now_ts}_{idx}"
+            register_dynamic_task(task_id, agent_goal, steps)
+            
+            agents_config.append({
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "personality": agent_role,
+                "goal": agent_goal,
+                "sub_swarm_id": agent_sub_swarm
+            })
+            
+            progress.advance(task_id_progress)
+        
+    # Update orchestrator.json with final assigned agent IDs
+    orchestrator_state = load_json(orchestrator_file)
+    if orchestrator_state:
+        for sid in orchestrator_state["sub_swarms"]:
+            orchestrator_state["sub_swarms"][sid]["agent_ids"] = []
+        for item in agents_config:
+            sid = item["sub_swarm_id"]
+            if sid in orchestrator_state["sub_swarms"]:
+                orchestrator_state["sub_swarms"][sid]["agent_ids"].append(item["agent_id"])
+        save_json(orchestrator_file, orchestrator_state)
+        
+    # Clear predefined personalities for next run
+    predefined_personalities.clear()
+    
+    write_to_monitor_log(f"Starting swarm with {len(agents_config)} agents. Initializing TUI dashboard visualization...", "INFO")
+    
+    supervisor_cmd = [
+        sys.executable, "supervisor.py",
+        "--agents-config", json.dumps(agents_config),
+        "--llm-provider", "ollama",
+        "--step-delay", "1.5"
+    ]
+    if args.interactive:
+        supervisor_cmd.append("--interactive")
+    if session_budget:
+        supervisor_cmd.extend(["--budget", str(session_budget)])
+    
+    synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
+    execute_dashboard_run(layout, supervisor_cmd)
+
+
+# Persistent Interactive TUI Dashboard Mode
+def run_tui_loop(layout, args):
+    global TUI_STATE, TUI_MACRO_GOAL, TUI_RECOMMENDED_CAP, TUI_DESIGNER_AGENTS
+    global TUI_DECOMPOSE_PROGRESS, TUI_SUPERVISOR_CMD, TUI_SUPERVISOR_PROC
+    global TUI_ARGS, session_budget, current_view
+    
+    TUI_ARGS = args
+    input_buffer = ""
+    prompt_state = {
+        "mode": None,          # 'spawn', 'blocker_choice', 'blocker_workaround', or None
+        "agent_id": None,
+        "agent_filepath": None,
+        "spawn_req": None,
+        "blocker_details": None,
+        "error_msg": None,
+        "msg_timer": 0.0
+    }
+    
+    is_interactive = args.interactive if hasattr(args, "interactive") else True
+    
+    def get_iso_timestamp():
+        from datetime import timezone
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    with Live(layout, refresh_per_second=5, screen=True) as live:
+        while True:
+            # 1. Update status/error message timer
+            if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
+                prompt_state["error_msg"] = None
+                
+            # 2. State specific updates
+            if TUI_STATE == "RUNNING":
+                # Ensure supervisor subprocess is running
+                if TUI_SUPERVISOR_PROC is None:
+                    TUI_SUPERVISOR_PROC = subprocess.Popen(TUI_SUPERVISOR_CMD)
+                    
+                # Poll supervisor subprocess
+                if TUI_SUPERVISOR_PROC.poll() is not None:
+                    TUI_SUPERVISOR_PROC = None
+                    # If this was a direct task run (non-persistent CLI mode), exit dashboard
+                    if args.run_redundant or args.task_id:
+                        break
+                    TUI_STATE = "MENU"
+                    prompt_state["error_msg"] = "[bold green][+] Swarm execution completed successfully.[/bold green]"
+                    prompt_state["msg_timer"] = time.time()
+                
+                # Check for interactive prompts from supervisor
+                if is_interactive and prompt_state["mode"] is None:
+                    if os.path.exists(AGENTS_DIR):
+                        for filename in os.listdir(AGENTS_DIR):
+                            if filename.endswith(".json"):
+                                filepath = os.path.join(AGENTS_DIR, filename)
+                                try:
+                                    with open(filepath, 'r') as f:
+                                        data = json.load(f)
+                                except Exception:
+                                    continue
+                                    
+                                spawn_req = data.get("spawn_request")
+                                if spawn_req and spawn_req.get("status") == "pending":
+                                    prompt_state.update({
+                                        "mode": "spawn",
+                                        "agent_id": data.get("id"),
+                                        "agent_filepath": filepath,
+                                        "spawn_req": spawn_req
+                                    })
+                                    break
+                                    
+                                status = data.get("status")
+                                blocker = data.get("blocker_details")
+                                if status == "pending_termination" and blocker:
+                                    prompt_state.update({
+                                        "mode": "blocker_choice",
+                                        "agent_id": data.get("id"),
+                                        "agent_filepath": filepath,
+                                        "blocker_details": blocker
+                                    })
+                                    break
+
+                # Verify prompt state validity (in case file state changes externally)
+                if prompt_state["mode"] is not None:
+                    filepath = prompt_state["agent_filepath"]
+                    if not os.path.exists(filepath):
+                        prompt_state["mode"] = None
+                    else:
+                        try:
+                            with open(filepath, 'r') as f:
+                                data = json.load(f)
+                            if prompt_state["mode"] == "spawn":
+                                spawn_req = data.get("spawn_request")
+                                if not spawn_req or spawn_req.get("status") != "pending":
+                                    prompt_state["mode"] = None
+                            elif prompt_state["mode"] in ["blocker_choice", "blocker_workaround"]:
+                                status = data.get("status")
+                                blocker = data.get("blocker_details")
+                                if status != "pending_termination" or not blocker:
+                                    prompt_state["mode"] = None
+                        except Exception:
+                            pass
+
+            # 3. Update layout components
             layout["header"].update(make_header_panel())
             layout["left"].update(make_agents_table())
             layout["center"].update(make_output_panel())
             layout["right_top"].update(make_collisions_panel())
-            layout["right_middle"].update(make_budget_alert_panel())
+            layout["right_middle"].update(make_budget_alert_panel(prompt_state))
             layout["right_bottom"].update(make_tombstones_panel())
-            layout["footer"].update(make_logs_panel())
-            console.print(layout)
+            layout["footer_logs"].update(make_logs_panel())
+            layout["footer_input"].update(make_input_panel(input_buffer, prompt_state))
             
-            # 2. Get prompt input at the bottom of the dashboard screen
-            prompt_str = "\n\033[1;36mSwarm Command (Type '/exit' to quit) > \033[0m"
-            user_input = input(prompt_str).strip()
-            if not user_input:
-                continue
-                
-            parts = user_input.strip().split(maxsplit=1)
-            cmd = parts[0].lower() if parts else ""
-            arg = parts[1] if len(parts) > 1 else None
-            
-            if cmd in ["/exit", "/quit", "exit", "quit"]:
-                os.system("clear")
-                print("\n" + "="*50)
-                print("    Terminal Dashboard Session Terminated")
-                print("="*50 + "\n")
-                break
-                
-            if cmd in ["/clean", "/purge", "/delete-artifacts"]:
-                purge_artifacts(arg)
-                time.sleep(1.5)
-                continue
-                
-            if cmd in ["/add-agent", "/add-personality"]:
-                if not arg:
-                    print("\n\033[1;31m[-] Error: Usage: /add-agent <role> : <goal> (goal is optional)\033[0m")
-                    time.sleep(2.0)
-                    continue
-                
-                if ":" in arg:
-                    r_part, g_part = arg.split(":", 1)
-                    role = r_part.strip()
-                    goal = g_part.strip()
-                else:
-                    role = arg.strip()
-                    goal = None
-                
-                if role:
-                    predefined_personalities.append({"role": role, "goal": goal})
-                    print(f"\n\033[1;32m[+] Registered agent: '{role}'\033[0m")
-                    if goal:
-                        print(f"    Dedicated Goal: '{goal}'")
-                else:
-                    print("\n\033[1;31m[-] Error: Role name cannot be empty.\033[0m")
-                time.sleep(1.5)
-                continue
-
-            if cmd == "/budget":
-                if not arg or not arg.isdigit():
-                    print("\n\033[1;31m[-] Error: Usage: /budget <new_cap>\033[0m")
-                    time.sleep(1.5)
-                    continue
-                cap = int(arg)
-                session_budget = cap
-                orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
-                if os.path.exists(orchestrator_file):
+            # 4. Read input character non-blockingly
+            import select
+            try:
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if rlist:
+                    import tty
+                    import termios
+                    fd = sys.stdin.fileno()
+                    old_settings = termios.tcgetattr(fd)
                     try:
-                        orc_state = load_json(orchestrator_file) or {}
-                        orc_state["budget_limit"] = cap
-                        save_json(orchestrator_file, orc_state)
-                        print(f"\n\033[1;32m[+] Budget cap updated dynamically to {cap}\033[0m")
-                    except Exception as e:
-                        print(f"\n\033[1;31m[-] Error updating budget: {e}\033[0m")
-                else:
-                    print(f"\n\033[1;32m[+] Budget cap updated to {cap} (will be applied on next run)\033[0m")
-                time.sleep(1.5)
-                continue
-
-            if cmd == "/view":
-                if not arg:
-                    current_view = "combined"
-                    print("\n\033[1;32m[+] View set to: Combined Hierarchy\033[0m")
-                else:
-                    target_view = arg.strip().lower()
-                    if target_view in ["combined", "main"]:
-                        current_view = "combined"
-                        print("\n\033[1;32m[+] View set to: Combined Hierarchy\033[0m")
-                    else:
-                        if target_view.isdigit():
-                            target_view = f"{int(target_view):03d}"
-                        current_view = target_view
-                        print(f"\n\033[1;32m[+] View set to Agent: {current_view}\033[0m")
-                time.sleep(1.0)
-                continue
-
-            if cmd == "/trace":
-                if not arg:
-                    print("\n\033[1;31m[-] Error: Usage: /trace <agent_id> (e.g. '/trace 001')\033[0m")
-                    time.sleep(2.0)
-                    continue
-                target_agent = arg.strip()
-                if target_agent.isdigit():
-                    target_agent = f"{int(target_agent):03d}"
-                
-                # Check if this agent node exists
-                import causal_tracer
-                conn = causal_tracer.get_db_connection()
-                try:
-                    node = conn.execute("SELECT id FROM trace_nodes WHERE id = ?", (f"agent_{target_agent}",)).fetchone()
-                except Exception:
-                    node = None
-                finally:
-                    conn.close()
-                
-                if not node:
-                    print(f"\n\033[1;31m[-] Error: Agent '{target_agent}' not found in causal traces.\033[0m")
-                    time.sleep(2.0)
-                    continue
-                
-                current_view = f"trace_{target_agent}"
-                print(f"\n\033[1;32m[+] View set to trace: Agent {target_agent}\033[0m")
-                time.sleep(1.0)
-                continue
-
-            if cmd in ["/memory", "/history"]:
-                try:
-                    import memory_store
-                    conn = memory_store.get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT id, goal, role, status, reflection, created_at FROM episodic_memories ORDER BY created_at DESC")
-                    rows = cursor.fetchall()
-                    conn.close()
-                    
-                    print("\n\033[1;36m=== HISTORICAL EPISODIC MEMORIES ===\033[0m")
-                    if not rows:
-                        print("No episodic memories found in storage.")
-                    else:
-                        from rich.console import Console
-                        from rich.table import Table
-                        table = Table(title="Episodic Memory Database", show_lines=True)
-                        table.add_column("ID", justify="center")
-                        table.add_column("Goal", style="cyan")
-                        table.add_column("Role", style="green")
-                        table.add_column("Status", justify="center")
-                        table.add_column("Reflection", style="magenta")
-                        table.add_column("Date", justify="center")
+                        tty.setraw(fd)
+                        ch = sys.stdin.read(1)
+                    finally:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                         
-                        for r in rows:
-                            status_colored = f"[bold green]{r['status']}[/bold green]" if r['status'] == 'completed' else f"[bold red]{r['status']}[/bold red]"
-                            table.add_row(
-                                str(r["id"]),
-                                r["goal"],
-                                r["role"] or "",
-                                status_colored,
-                                r["reflection"] or "",
-                                r["created_at"]
-                            )
-                        c = Console()
-                        c.print(table)
-                except Exception as e:
-                    print(f"[-] Error querying memories: {e}")
-                print("\nPress Enter to return to dashboard...")
-                input()
-                continue
+                    if prompt_state["error_msg"]:
+                        prompt_state["error_msg"] = None
+                        
+                    if ch == '\x03':  # Ctrl+C
+                        raise KeyboardInterrupt
+                    elif ch in ('\r', '\n'):
+                        cmd_line = input_buffer.strip()
+                        input_buffer = ""
+                        
+                        # Process based on TUI_STATE and active mode
+                        if TUI_STATE == "RUNNING" and prompt_state["mode"] is not None:
+                            # Handle active interactive prompts
+                            if prompt_state["mode"] == "spawn":
+                                filepath = prompt_state["agent_filepath"]
+                                spawn_req = prompt_state["spawn_req"]
+                                if cmd_line.lower() in ["y", "yes", "approve"]:
+                                    spawn_req["status"] = "approved"
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["spawn_request"] = spawn_req
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold green][+] Spawn APPROVED for Agent {prompt_state['agent_id']}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                elif cmd_line.lower() in ["n", "no", "reject"]:
+                                    spawn_req["status"] = "rejected"
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["spawn_request"] = spawn_req
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold yellow][-] Spawn REJECTED for Agent {prompt_state['agent_id']}[/bold yellow]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Invalid option. Type y or n.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                            elif prompt_state["mode"] == "blocker_choice":
+                                if cmd_line == "1":
+                                    prompt_state["mode"] = "blocker_workaround"
+                                elif cmd_line == "2":
+                                    filepath = prompt_state["agent_filepath"]
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["steps_completed"] += 1
+                                        tasks_data = load_json(MOCK_TASKS_FILE)
+                                        task_id = agent_data.get("task_id")
+                                        if tasks_data and task_id in tasks_data.get("tasks", {}):
+                                            steps = tasks_data["tasks"][task_id].get("steps", [])
+                                            agent_data["progress"] = int((agent_data["steps_completed"] / len(steps)) * 100)
+                                            if agent_data["steps_completed"] < len(steps):
+                                                next_step = steps[agent_data["steps_completed"]]
+                                                agent_data["current_step"] = {
+                                                    "step_id": next_step["step_id"],
+                                                    "name": next_step["name"],
+                                                    "description": next_step["description"]
+                                                }
+                                            else:
+                                                agent_data["status"] = "completed"
+                                                agent_data["current_step"] = None
+                                        if agent_data["status"] != "completed":
+                                            agent_data["status"] = "exploring"
+                                        agent_data["blocker_details"] = None
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold green][+] Blocker bypassed for Agent {prompt_state['agent_id']}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                    
+                                elif cmd_line == "3":
+                                    filepath = prompt_state["agent_filepath"]
+                                    try:
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["status"] = "dead"
+                                        agent_data["blocker_details"] = None
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold red][-] Agent {prompt_state['agent_id']} terminated[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Invalid option. Enter 1, 2, or 3.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                            elif prompt_state["mode"] == "blocker_workaround":
+                                if cmd_line:
+                                    filepath = prompt_state["agent_filepath"]
+                                    blocker = prompt_state["blocker_details"]
+                                    try:
+                                        tombstones = load_json(TOMBSTONES_FILE) or []
+                                        tombstones.append({
+                                            "file_path": blocker.get("file_path", "unknown"),
+                                            "tool_used": blocker.get("tool_used", "unknown"),
+                                            "error_message": blocker.get("error_message", "unknown"),
+                                            "fix_action": cmd_line,
+                                            "timestamp": get_iso_timestamp()
+                                        })
+                                        save_json(TOMBSTONES_FILE, tombstones)
+                                        
+                                        with open(filepath, 'r') as f:
+                                            agent_data = json.load(f)
+                                        agent_data["status"] = "exploring"
+                                        agent_data["blocker_details"] = None
+                                        save_json(filepath, agent_data)
+                                        prompt_state["error_msg"] = f"[bold green][+] Workaround registered for Agent {prompt_state['agent_id']}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    except Exception as e:
+                                        prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    prompt_state["mode"] = None
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Workaround cannot be empty.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                        
+                        elif TUI_STATE == "BUDGET_CONFIRM":
+                            if not cmd_line or cmd_line.lower() in ["y", "yes"]:
+                                session_budget = TUI_RECOMMENDED_CAP
+                                TUI_STATE = "DESIGNER"
+                            elif cmd_line.isdigit():
+                                session_budget = int(cmd_line)
+                                TUI_STATE = "DESIGNER"
+                            else:
+                                prompt_state["error_msg"] = "[bold red][-] Invalid cap. Press enter to confirm or type an integer.[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                                
+                        elif TUI_STATE == "DESIGNER":
+                            if not cmd_line:
+                                continue
+                            parts = cmd_line.split(maxsplit=1)
+                            cmd = parts[0].lower()
+                            arg = parts[1] if len(parts) > 1 else None
+                            
+                            if cmd == "/run":
+                                if not TUI_DESIGNER_AGENTS:
+                                    prompt_state["error_msg"] = "[bold red][-] Error: Swarm cannot be empty.[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                TUI_STATE = "DECOMPOSING_AGENTS"
+                                threading.Thread(target=bg_decompose_agent_goals, daemon=True).start()
+                            elif cmd == "/cancel":
+                                TUI_STATE = "MENU"
+                            elif cmd == "/add":
+                                if not arg:
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /add <role> : <goal>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                if ":" in arg:
+                                    r_part, g_part = arg.split(":", 1)
+                                    r = r_part.strip()
+                                    g = g_part.strip()
+                                else:
+                                    r = arg.strip()
+                                    g = None
+                                if r:
+                                    TUI_DESIGNER_AGENTS.append({"role": r, "goal": g})
+                                    prompt_state["error_msg"] = f"[bold green][+] Added agent: {r}[/bold green]"
+                                    prompt_state["msg_timer"] = time.time()
+                            elif cmd == "/remove":
+                                if not arg or not arg.isdigit():
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /remove <num>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                num = int(arg) - 1
+                                if 0 <= num < len(TUI_DESIGNER_AGENTS):
+                                    removed = TUI_DESIGNER_AGENTS.pop(num)
+                                    prompt_state["error_msg"] = f"[bold yellow][-] Removed agent: {removed['role']}[/bold yellow]"
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Error: Invalid agent number.[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                            elif cmd == "/edit":
+                                if not arg:
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /edit <num> role=<val> OR goal=<val>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                subparts = arg.split(maxsplit=1)
+                                if len(subparts) < 2 or not subparts[0].isdigit():
+                                    prompt_state["error_msg"] = "[bold red][-] Usage: /edit <num> role=<val> OR goal=<val>[/bold red]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    continue
+                                num = int(subparts[0]) - 1
+                                edit_arg = subparts[1]
+                                if 0 <= num < len(TUI_DESIGNER_AGENTS):
+                                    if "=" in edit_arg:
+                                        field, val = edit_arg.split("=", 1)
+                                        field = field.strip().lower()
+                                        val = val.strip()
+                                        if field in ["role", "goal"]:
+                                            TUI_DESIGNER_AGENTS[num][field] = val
+                                            prompt_state["error_msg"] = f"[bold green][+] Updated Agent {num+1} {field}.[/bold green]"
+                                        else:
+                                            prompt_state["error_msg"] = "[bold red][-] Field must be role or goal.[/bold red]"
+                                    else:
+                                        prompt_state["error_msg"] = "[bold red][-] Format: field=value.[/bold red]"
+                                else:
+                                    prompt_state["error_msg"] = "[bold red][-] Invalid agent number.[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                            else:
+                                prompt_state["error_msg"] = f"[bold red][-] Unknown designer command: {cmd}[/bold red]"
+                                prompt_state["msg_timer"] = time.time()
+                                
+                        elif TUI_STATE in ["DECOMPOSING_MACRO", "DECOMPOSING_AGENTS"]:
+                            # Ignore inputs during async operations
+                            continue
+                            
+                        else:
+                            # Normal TUI command line mode (STATE_MENU or RUNNING with no active prompt)
+                            if cmd_line:
+                                parts = cmd_line.split(maxsplit=1)
+                                cmd = parts[0].lower()
+                                arg = parts[1] if len(parts) > 1 else None
+                                
+                                if cmd in ["/exit", "/quit"]:
+                                    raise KeyboardInterrupt
+                                    
+                                elif cmd in ["/clean", "/purge"]:
+                                    purge_artifacts(arg)
+                                    prompt_state["error_msg"] = f"[bold green][+] Cleaned target: {arg or 'all'}[/bold green]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                                elif cmd in ["/add-agent", "/add-personality"]:
+                                    if not arg:
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /add-agent <role> : <goal>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        if ":" in arg:
+                                            r_part, g_part = arg.split(":", 1)
+                                            role = r_part.strip()
+                                            goal = g_part.strip()
+                                        else:
+                                            role = arg.strip()
+                                            goal = None
+                                        if role:
+                                            predefined_personalities.append({"role": role, "goal": goal})
+                                            prompt_state["error_msg"] = f"[bold green][+] Registered agent: '{role}'[/bold green]"
+                                        else:
+                                            prompt_state["error_msg"] = "[bold red][-] Error: Role name cannot be empty.[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                                elif cmd == "/budget":
+                                    if not arg or not arg.isdigit():
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /budget <new_cap>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        cap = int(arg)
+                                        session_budget = cap
+                                        orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+                                        if os.path.exists(orchestrator_file):
+                                            try:
+                                                orc_state = load_json(orchestrator_file) or {}
+                                                orc_state["budget_limit"] = cap
+                                                save_json(orchestrator_file, orc_state)
+                                                prompt_state["error_msg"] = f"[bold green][+] Budget updated dynamically to {cap}[/bold green]"
+                                            except Exception as e:
+                                                prompt_state["error_msg"] = f"[bold red][-] Error updating budget: {e}[/bold red]"
+                                        else:
+                                            prompt_state["error_msg"] = f"[bold green][+] Budget cap updated to {cap}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                                elif cmd == "/view":
+                                    if not arg:
+                                        current_view = "combined"
+                                        prompt_state["error_msg"] = "[bold green][+] View set to: Combined Hierarchy[/bold green]"
+                                    else:
+                                        target_view = arg.strip().lower()
+                                        if target_view in ["combined", "main"]:
+                                            current_view = "combined"
+                                            prompt_state["error_msg"] = "[bold green][+] View set to: Combined Hierarchy[/bold green]"
+                                        else:
+                                            if target_view.isdigit():
+                                                target_view = f"{int(target_view):03d}"
+                                            current_view = target_view
+                                            prompt_state["error_msg"] = f"[bold green][+] View set to Agent: {current_view}[/bold green]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                                elif cmd == "/trace":
+                                    if not arg:
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /trace <agent_id>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        target_agent = arg.strip()
+                                        if target_agent.isdigit():
+                                            target_agent = f"{int(target_agent):03d}"
+                                            
+                                        import causal_tracer
+                                        conn = causal_tracer.get_db_connection()
+                                        try:
+                                            node = conn.execute("SELECT id FROM trace_nodes WHERE id = ?", (f"agent_{target_agent}",)).fetchone()
+                                        except Exception:
+                                            node = None
+                                        finally:
+                                            conn.close()
+                                            
+                                        if not node:
+                                            prompt_state["error_msg"] = f"[bold red][-] Agent {target_agent} not found in causal traces[/bold red]"
+                                        else:
+                                            current_view = f"trace_{target_agent}"
+                                            prompt_state["error_msg"] = f"[bold green][+] View set to trace: Agent {target_agent}[/bold green]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                                elif cmd in ["/memory", "/history"]:
+                                    current_view = "memory"
+                                    prompt_state["error_msg"] = "[bold green][+] View set to Episodic Memory Archives[/bold green]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                                elif cmd == "/help":
+                                    current_view = "help"
+                                    prompt_state["error_msg"] = "[bold green][+] View set to Help Menu[/bold green]"
+                                    prompt_state["msg_timer"] = time.time()
+                                    
+                                elif cmd == "/prune" and TUI_STATE == "RUNNING":
+                                    if not arg:
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /prune <agent_id>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        agent_id = arg.strip().zfill(3)
+                                        success, msg = handle_dashboard_pruning(agent_id)
+                                        if success:
+                                            prompt_state["error_msg"] = f"[bold green][+] {msg}[/bold green]"
+                                            prompt_state["msg_timer"] = time.time()
+                                        else:
+                                            prompt_state["error_msg"] = f"[bold red][-] {msg}[/bold red]"
+                                            prompt_state["msg_timer"] = time.time()
+                                            
+                                elif cmd == "/approve" and TUI_STATE == "RUNNING":
+                                    if not arg:
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /approve <agent_id>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        target_aid = arg.strip().zfill(3)
+                                        filepath = os.path.join(AGENTS_DIR, f"agent_{target_aid}.json")
+                                        if os.path.exists(filepath):
+                                            try:
+                                                with open(filepath, 'r') as f:
+                                                    agent_data = json.load(f)
+                                                spawn_req = agent_data.get("spawn_request")
+                                                if spawn_req and spawn_req.get("status") == "pending":
+                                                    spawn_req["status"] = "approved"
+                                                    agent_data["spawn_request"] = spawn_req
+                                                    save_json(filepath, agent_data)
+                                                    prompt_state["error_msg"] = f"[bold green][+] Spawn APPROVED for Agent {target_aid}[/bold green]"
+                                                else:
+                                                    prompt_state["error_msg"] = f"[bold red][-] No pending spawn request for Agent {target_aid}[/bold red]"
+                                            except Exception as e:
+                                                prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        else:
+                                            prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} not found[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                                elif cmd == "/reject" and TUI_STATE == "RUNNING":
+                                    if not arg:
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /reject <agent_id>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        target_aid = arg.strip().zfill(3)
+                                        filepath = os.path.join(AGENTS_DIR, f"agent_{target_aid}.json")
+                                        if os.path.exists(filepath):
+                                            try:
+                                                with open(filepath, 'r') as f:
+                                                    agent_data = json.load(f)
+                                                spawn_req = agent_data.get("spawn_request")
+                                                if spawn_req and spawn_req.get("status") == "pending":
+                                                    spawn_req["status"] = "rejected"
+                                                    agent_data["spawn_request"] = spawn_req
+                                                    save_json(filepath, agent_data)
+                                                    prompt_state["error_msg"] = f"[bold yellow][-] Spawn REJECTED for Agent {target_aid}[/bold yellow]"
+                                                else:
+                                                    prompt_state["error_msg"] = f"[bold red][-] No pending spawn request for Agent {target_aid}[/bold red]"
+                                            except Exception as e:
+                                                prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        else:
+                                            prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} not found[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                                elif cmd == "/resolve" and TUI_STATE == "RUNNING":
+                                    subparts = arg.strip().split() if arg else []
+                                    if len(subparts) < 2:
+                                        prompt_state["error_msg"] = "[bold red][-] Usage: /resolve <agent_id> <1|2|3>[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                    else:
+                                        target_aid = subparts[0].zfill(3)
+                                        choice = subparts[1]
+                                        filepath = os.path.join(AGENTS_DIR, f"agent_{target_aid}.json")
+                                        if os.path.exists(filepath):
+                                            try:
+                                                with open(filepath, 'r') as f:
+                                                    agent_data = json.load(f)
+                                                status = agent_data.get("status")
+                                                blocker = agent_data.get("blocker_details")
+                                                if status == "pending_termination" and blocker:
+                                                    if choice == "1":
+                                                        prompt_state.update({
+                                                            "mode": "blocker_workaround",
+                                                            "agent_id": target_aid,
+                                                            "agent_filepath": filepath,
+                                                            "blocker_details": blocker
+                                                        })
+                                                        prompt_state["error_msg"] = f"[bold yellow][*] Enter manual workaround for Agent {target_aid} below...[/bold yellow]"
+                                                    elif choice == "2":
+                                                        tombstones = load_json(TOMBSTONES_FILE) or []
+                                                        tombstones.append({
+                                                            "file_path": blocker.get("file_path", "unknown"),
+                                                            "tool_used": blocker.get("tool_used", "unknown"),
+                                                            "error_message": blocker.get("error_message", "unknown"),
+                                                            "fix_action": "Bypassed by User command",
+                                                            "timestamp": get_iso_timestamp()
+                                                        })
+                                                        save_json(TOMBSTONES_FILE, tombstones)
+                                                        agent_data["status"] = "exploring"
+                                                        agent_data["blocker_details"] = None
+                                                        save_json(filepath, agent_data)
+                                                        prompt_state["error_msg"] = f"[bold green][+] Agent {target_aid} bypass recorded. Resuming...[/bold green]"
+                                                    elif choice == "3":
+                                                        success, msg = handle_dashboard_pruning(target_aid)
+                                                        if success:
+                                                            prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} pruned[/bold red]"
+                                                        else:
+                                                            prompt_state["error_msg"] = f"[bold red][-] {msg}[/bold red]"
+                                                    else:
+                                                        prompt_state["error_msg"] = "[bold red][-] Invalid choice. Must be 1, 2, or 3.[/bold red]"
+                                                else:
+                                                    prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} is not blocked[/bold red]"
+                                            except Exception as e:
+                                                prompt_state["error_msg"] = f"[bold red][-] Error: {e}[/bold red]"
+                                        else:
+                                            prompt_state["error_msg"] = f"[bold red][-] Agent {target_aid} not found[/bold red]"
+                                        prompt_state["msg_timer"] = time.time()
+                                        
+                                else:
+                                    # State is STATE_MENU, input is a new task query!
+                                    # Start macro goal decomposition in a background thread!
+                                    TUI_MACRO_GOAL = cmd_line
+                                    TUI_STATE = "DECOMPOSING_MACRO"
+                                    threading.Thread(target=bg_decompose_macro_goal, args=(cmd_line,), daemon=True).start()
+                                    
+                    elif ord(ch) in (127, 8):
+                        input_buffer = input_buffer[:-1]
+                    elif len(ch) == 1 and (32 <= ord(ch) <= 126):
+                        input_buffer += ch
+            except select.error:
+                pass
+            time.sleep(0.05)
 
-            if cmd == "/help":
-                print("\n\033[1;33mAvailable Dashboard CLI Commands:\033[0m")
-                print("  /help                     - Show this help dialogue")
-                print("  /add-agent <role> : <goal> - Predefine custom agent role and dedicated goal")
-                print("                              (e.g., '/add-agent Tester : Write tests')")
-                print("  /view [combined/id]       - Switch between combined tree synthesis and individual agent outputs")
-                print("                              (e.g., '/view 001' or '/view combined')")
-                print("  /clean [target]           - Clean specific storage/files rather than everything.")
-                print("                              Supported targets: 'logs', 'workspaces', 'collisions',")
-                print("                              'tombstones', 'tasks', 'memory', 'all', or a specific filename")
-                print("  /delete-artifacts         - Synonym for /clean")
-                print("  /memory                   - Display past recorded run episodes")
-                print("  /trace <agent_id>         - Display visual Mermaid flowchart and chronological event timeline")
-                print("  /exit                     - Exit the TUI Dashboard\n")
-                print("Press Enter to return to dashboard...")
-                input()
-                continue
 
-            # Decompose goal into sub-swarms first
-            orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
-            os.makedirs(STATE_DIR, exist_ok=True)
-            
-            initial_swarm = []
-            if predefined_personalities:
-                for idx, entry in enumerate(predefined_personalities):
-                    initial_swarm.append({
-                        "role": entry["role"],
-                        "goal": entry["goal"] or user_input,
-                        "sub_swarm_id": "swarm_001"
-                    })
-                orchestrator_state = {
-                    "macro_goal": user_input,
-                    "sub_swarms": {
-                        "swarm_001": {
-                            "id": "swarm_001",
-                            "goal": user_input,
-                            "role": "Custom Swarm",
-                            "dependencies": [],
-                            "status": "pending",
-                            "agent_ids": []
-                        }
-                    }
-                }
-                save_json(orchestrator_file, orchestrator_state)
-            else:
-                write_to_monitor_log(f"No custom agents defined. Decomposing task into sub-swarms for: '{user_input}'...", "INFO")
-                with console.status("[bold yellow]Decomposing macro task into sub-swarms via Ollama...", spinner="dots"):
-                    decomposition = decompose_macro_goal(user_input)
-                
-                sub_swarms_dict = {}
-                for s in decomposition["sub_swarms"]:
-                    sub_swarms_dict[s["id"]] = {
-                        "id": s["id"],
-                        "goal": s["goal"],
-                        "role": s["role"],
-                        "dependencies": s["dependencies"],
-                        "status": "pending",
-                        "agent_ids": []
-                    }
-                    initial_swarm.append({
-                        "role": s["role"],
-                        "goal": s["goal"],
-                        "sub_swarm_id": s["id"]
-                    })
-                    
-                orchestrator_state = {
-                    "macro_goal": user_input,
-                    "sub_swarms": sub_swarms_dict
-                }
-                save_json(orchestrator_file, orchestrator_state)
-            
-            # Enter Swarm Designer Mode to review/modify roles/goals
-            final_swarm = run_swarm_designer(initial_swarm, user_input, layout)
-            if final_swarm is None:
-                predefined_personalities.clear()
-                write_to_monitor_log("Swarm design cancelled by user.", "WARNING")
-                continue
-                
-            # Decompose goals and register tasks
-            agents_config = []
-            now_ts = int(time.time())
-            
-            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                console=console
-            ) as progress:
-                task_id_progress = progress.add_task("[yellow]Decomposing agent goals...", total=len(final_swarm))
-                
-                for idx, entry in enumerate(final_swarm):
-                    agent_role = entry.get("role", "Generalist")
-                    agent_goal = entry.get("goal") or user_input
-                    agent_id = f"{idx+1:03d}"
-                    agent_sub_swarm = entry.get("sub_swarm_id", "swarm_001")
-                    
-                    progress.update(task_id_progress, description=f"[yellow]Agent {agent_id} ({agent_role}): Decomposing goal...")
-                    write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role}): '{agent_goal}'...", "INFO")
-                    
-                    steps = generate_task_steps(agent_goal)
-                    if not steps:
-                        steps = [
-                            {
-                                "step_id": 1,
-                                "name": "General Execution",
-                                "description": f"Perform tasks for: {agent_goal}",
-                                "touched_files": [f"src/agent_{agent_id}_output.md"],
-                                "tools": ["edit_file"]
-                            }
-                        ]
-                    
-                    task_id = f"task_dynamic_{now_ts}_{idx}"
-                    register_dynamic_task(task_id, agent_goal, steps)
-                    
-                    agents_config.append({
-                        "agent_id": agent_id,
-                        "task_id": task_id,
-                        "personality": agent_role,
-                        "goal": agent_goal,
-                        "sub_swarm_id": agent_sub_swarm
-                    })
-                    
-                    progress.advance(task_id_progress)
-                
-            # Update orchestrator.json with final assigned agent IDs
-            orchestrator_state = load_json(orchestrator_file)
-            if orchestrator_state:
-                for sid in orchestrator_state["sub_swarms"]:
-                    orchestrator_state["sub_swarms"][sid]["agent_ids"] = []
-                for item in agents_config:
-                    sid = item["sub_swarm_id"]
-                    if sid in orchestrator_state["sub_swarms"]:
-                        orchestrator_state["sub_swarms"][sid]["agent_ids"].append(item["agent_id"])
-                save_json(orchestrator_file, orchestrator_state)
-                
-            # Clear predefined personalities for next run
-            predefined_personalities.clear()
-            
-            write_to_monitor_log(f"Starting swarm with {len(agents_config)} agents. Initializing TUI dashboard visualization...", "INFO")
-            
-            supervisor_cmd = [
-                sys.executable, "supervisor.py",
-                "--agents-config", json.dumps(agents_config),
-                "--llm-provider", "ollama",
-                "--step-delay", "1.5"
-            ]
-            if args.interactive:
-                supervisor_cmd.append("--interactive")
-            if session_budget:
-                supervisor_cmd.extend(["--budget", str(session_budget)])
-            
-            synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
-            execute_dashboard_run(layout, supervisor_cmd)
-            
-        except (KeyboardInterrupt, EOFError):
-            os.system("clear")
-            print("\n" + "="*50)
-            print("    Terminal Dashboard Session Terminated")
-            print("="*50 + "\n")
-            break
+    try:
+        run_tui_loop(layout, args)
+    except (KeyboardInterrupt, EOFError):
+        os.system("clear")
+        print("\n" + "="*50)
+        print("    Terminal Dashboard Session Terminated")
+        print("="*50 + "\n")
 
 
 if __name__ == "__main__":

@@ -469,7 +469,7 @@ def run_cascading_kills():
             cascade(agent_id)
 
 
-BUDGET = 4
+BUDGET = 20000
 
 
 def call_ollama_api_local(prompt, model):
@@ -540,9 +540,10 @@ def rank_leaf_agents_llm(leaf_agents, macro_goal, llm_model=OLLAMA_MODEL):
     now = time.time()
     def get_fallback_sort_key(agent):
         progress = agent.get("progress", 0)
+        tokens = agent.get("output_tokens", 0)
         last_updated = agent.get("last_updated", now)
         inactivity = now - last_updated
-        return (progress, -inactivity)
+        return (progress, -tokens, -inactivity)
         
     fallback_ranking = sorted(leaf_agents, key=get_fallback_sort_key)
     fallback_result = []
@@ -550,7 +551,7 @@ def rank_leaf_agents_llm(leaf_agents, macro_goal, llm_model=OLLAMA_MODEL):
         inactivity_duration = now - a.get("last_updated", now)
         fallback_result.append({
             "id": a["id"],
-            "reason": f"Heuristic ranking: progress is {a.get('progress', 0)}%, inactive for {int(inactivity_duration)}s."
+            "reason": f"Heuristic ranking: progress is {a.get('progress', 0)}%, output tokens: {a.get('output_tokens', 0)}, inactive for {int(inactivity_duration)}s."
         })
         
     if not is_ollama_running() and not os.environ.get("GEMINI_API_KEY"):
@@ -559,12 +560,12 @@ def rank_leaf_agents_llm(leaf_agents, macro_goal, llm_model=OLLAMA_MODEL):
     for a in leaf_agents:
         agents_desc.append(
             f"- Agent {a['id']}: Goal='{a.get('goal')}', Role/Personality='{a.get('personality', 'Generalist')}', "
-            f"Progress={a.get('progress')}%"
+            f"Progress={a.get('progress')}%, Output Tokens={a.get('output_tokens', 0)}"
         )
     agents_str = "\n".join(agents_desc)
     prompt = (
         f"You are the Swarm Supervisor coordinating a research swarm working on the macro goal: '{macro_goal}'.\n"
-        f"The active agent budget is exceeded, and we need to evaluate which active leaf agents are least productive "
+        f"The active agent output token budget is exceeded, and we need to evaluate which active leaf agents are least productive "
         f"or contributing the least to the overall macro goal.\n\n"
         f"Here are the active leaf agents:\n{agents_str}\n\n"
         f"Please rate and rank them from LEAST productive/contributing to MOST productive/contributing. "
@@ -613,7 +614,6 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
             
             agents = load_active_agents()
             active_agents = [a for a in agents if a["status"] in ["exploring", "syncing", "pending_termination"]]
-            active_count = len(active_agents)
             
             # Dynamically read budget limit from orchestrator.json if present
             orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
@@ -629,12 +629,20 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                 except Exception:
                     pass
                     
-            if active_count > current_budget:
-                leafs = get_active_leaf_agents(active_agents)
+            # Check if any active leaf agent's accumulated output tokens exceed the budget cap
+            leafs = get_active_leaf_agents(active_agents)
+            budget_exceeded = False
+            max_leaf_tokens = 0
+            for leaf in leafs:
+                max_leaf_tokens = max(max_leaf_tokens, leaf.get("output_tokens", 0))
+                if leaf.get("output_tokens", 0) > current_budget:
+                    budget_exceeded = True
+                    
+            if budget_exceeded:
                 ranked = rank_leaf_agents_llm(leafs, macro_goal, OLLAMA_MODEL)
                 alert_data = {
                     "budget_exceeded": True,
-                    "active_count": active_count,
+                    "active_count": max_leaf_tokens,  # Holds max leaf output tokens for display
                     "budget_limit": current_budget,
                     "candidates": ranked
                 }
@@ -722,7 +730,7 @@ if __name__ == "__main__":
     parser.add_argument("--threshold", type=float, default=0.5, help="Collision distance threshold (lower = closer)")
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model to use for phase classification")
     parser.add_argument("--interactive", action="store_true", help="Enable terminal prompts to manually negotiate collisions")
-    parser.add_argument("--budget", type=int, default=4, help="Maximum number of active agents in the swarm")
+    parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     args = parser.parse_args()
     
     OLLAMA_MODEL = args.ollama_model

@@ -22,6 +22,23 @@ TOMBSTONES_FILE = os.path.join(STATE_DIR, "tombstones.json")
 MOCK_TASKS_FILE = os.path.join(os.getcwd(), "mock_tasks.json")
 
 
+CURRENT_AGENT_STATE_FILE = None
+
+def _accumulate_tokens(count):
+    global CURRENT_AGENT_STATE_FILE
+    if not CURRENT_AGENT_STATE_FILE or count <= 0:
+        return
+    try:
+        import os
+        if os.path.exists(CURRENT_AGENT_STATE_FILE):
+            data = load_json(CURRENT_AGENT_STATE_FILE)
+            if data:
+                data["output_tokens"] = data.get("output_tokens", 0) + count
+                save_json(CURRENT_AGENT_STATE_FILE, data)
+    except Exception:
+        pass
+
+
 def load_json(filepath):
     if not os.path.exists(filepath):
         return None
@@ -77,6 +94,14 @@ def call_gemini_api(prompt):
         with urllib.request.urlopen(req, timeout=10) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # Extract output tokens from candidatesTokenCount
+            usage = res_data.get("usageMetadata", {})
+            tokens = usage.get("candidatesTokenCount", len(text) // 4)
+            if tokens <= 0:
+                tokens = 1
+            _accumulate_tokens(tokens)
+            
             return json.loads(text.strip())
     except Exception as e:
         print(f"[LLM ERROR] Gemini API call failed: {e}")
@@ -103,6 +128,12 @@ def call_ollama_api(prompt, model="gemma4:latest"):
         with urllib.request.urlopen(req, timeout=60) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             text = res_data["response"]
+            
+            tokens = res_data.get("eval_count", len(text) // 4)
+            if tokens <= 0:
+                tokens = 1
+            _accumulate_tokens(tokens)
+            
             return json.loads(text.strip())
     except Exception as e:
         print(f"[LLM ERROR] Ollama API call failed (Model: {model}): {e}")
@@ -127,7 +158,14 @@ def call_ollama_raw(prompt, model="gemma4:latest"):
         )
         with urllib.request.urlopen(req, timeout=60) as response:
             res_data = json.loads(response.read().decode("utf-8"))
-            return res_data.get("response", "").strip()
+            text = res_data.get("response", "").strip()
+            
+            tokens = res_data.get("eval_count", len(text) // 4)
+            if tokens <= 0:
+                tokens = 1
+            _accumulate_tokens(tokens)
+            
+            return text
     except Exception as e:
         print(f"[LLM ERROR] Raw Ollama call failed (Model: {model}): {e}")
         return None
@@ -218,6 +256,13 @@ def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest", reg
                 res_data = json.loads(response.read().decode("utf-8"))
                 
             assistant_msg = res_data.get("message", {})
+            content_str = assistant_msg.get("content", "")
+            tool_calls_str = json.dumps(assistant_msg.get("tool_calls", []))
+            fallback_tokens = (len(content_str) + len(tool_calls_str)) // 4
+            tokens = res_data.get("eval_count", fallback_tokens)
+            if tokens <= 0:
+                tokens = 1
+            _accumulate_tokens(tokens)
             tool_calls = assistant_msg.get("tool_calls", [])
             
             # If the model requested tool calls, we must execute them
@@ -311,6 +356,8 @@ class AgentRunner:
         self.sub_swarm_id = sub_swarm_id
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
+        global CURRENT_AGENT_STATE_FILE
+        CURRENT_AGENT_STATE_FILE = self.state_file
         self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
         
         os.makedirs(AGENTS_DIR, exist_ok=True)
@@ -392,13 +439,14 @@ class AgentRunner:
         print(f"Initialized Agent {self.agent_id} for Task '{self.task_id}' (Offset: {self.offset_suffix}) with role '{self.personality}' and goal '{state['goal']}'.")
         return state
 
-    def request_spawn_agent(self, goal, initial_files):
+    def request_spawn_agent(self, goal, initial_files, reason=None):
         """Writes a spawn_request block to the agent's state file for supervisor monitoring."""
         self.state = load_json(self.state_file) or self.state
         self.state["spawn_request"] = {
             "goal": goal,
             "initial_files": list(initial_files),
-            "status": "pending"
+            "status": "pending",
+            "reason": reason or "Accelerate step execution and parallelize sub-task work."
         }
         save_json(self.state_file, self.state)
         print(f"  [Spawn Request] Registered request to spawn child agent with goal: '{goal}'")
@@ -408,8 +456,30 @@ class AgentRunner:
         })
 
     def evaluate_isolation_spawn(self):
+        # Prevent spawning if there's already an active spawn request on this agent
+        spawn_req = self.state.get("spawn_request")
+        if spawn_req and spawn_req.get("status") in ["pending", "approved"]:
+            return
+
+        # Check if the current agent already has an active child agent exploring
+        has_active_child = False
+        if os.path.exists(AGENTS_DIR):
+            for filename in os.listdir(AGENTS_DIR):
+                if filename.endswith(".json") and not filename.endswith(f"agent_{self.agent_id}.json"):
+                    try:
+                        filepath = os.path.join(AGENTS_DIR, filename)
+                        with open(filepath, 'r') as f:
+                            data = json.load(f)
+                        if data.get("parent_id") == self.agent_id and data.get("status") in ["exploring", "syncing"]:
+                            has_active_child = True
+                            break
+                    except Exception:
+                        pass
+        if has_active_child:
+            return
+
         steps_comp = self.state.get("steps_completed", 0)
-        if steps_comp <= 0 or steps_comp % 5 != 0:
+        if steps_comp < 0:
             return
 
         is_semantically_isolated = False
@@ -482,15 +552,21 @@ class AgentRunner:
                     provider = "ollama"
             
             if provider in ["gemini", "ollama"] and remaining_steps_desc:
+                if steps_comp == 0:
+                    isolation_text = "You are starting this task without other agents' help."
+                else:
+                    isolation_text = f"You have been working in isolation for {steps_comp} steps without other agents' help."
+
                 prompt = (
                     f"You are the Swarm Agent {self.agent_id} working on the task: '{self.state['goal']}'.\n"
-                    f"You have been working in isolation for 5 steps without other agents' help.\n"
+                    f"{isolation_text}\n"
                     f"Here are your remaining steps:\n{remaining_steps_desc}\n\n"
                     f"Evaluate if spawning a helper agent with a specific sub-task will accelerate execution.\n"
                     f"Respond strictly in JSON with keys:\n"
                     f"1. 'should_spawn' (boolean: true/false)\n"
                     f"2. 'goal' (string: clear narrow task goal for the helper agent)\n"
                     f"3. 'initial_files' (array of strings: files for helper to edit/create)\n"
+                    f"4. 'reason' (string: explanation of why this sub-task is needed and how it speeds up the main goal)\n"
                 )
                 res = None
                 try:
@@ -501,13 +577,21 @@ class AgentRunner:
                 except Exception:
                     pass
                 
-                if res and res.get("should_spawn"):
-                    goal = res.get("goal", default_goal)
-                    initial_files = res.get("initial_files", default_files)
-                    if isinstance(initial_files, str):
-                        initial_files = [initial_files]
-
-            self.request_spawn_agent(goal, initial_files)
+                if res:
+                    if res.get("should_spawn"):
+                        goal = res.get("goal", default_goal)
+                        initial_files = res.get("initial_files", default_files)
+                        reason = res.get("reason", "Accelerate step execution and parallelize sub-task work.")
+                        if isinstance(initial_files, str):
+                            initial_files = [initial_files]
+                        self.request_spawn_agent(goal, initial_files, reason)
+                        return
+                    else:
+                        # LLM decided not to spawn helper agent
+                        return
+ 
+            # If no LLM provider is active/available, we fallback to default rule-based spawn
+            self.request_spawn_agent(goal, initial_files, "Rule-based isolation spawn fallback.")
 
     def load_historical_context(self):
         """Loads historical context from episodic memory matching the goal."""

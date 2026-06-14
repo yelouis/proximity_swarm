@@ -96,7 +96,7 @@ def evaluate_sub_swarm_completion():
         print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
-def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=4):
+def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000):
     """
     Launches a swarm dynamically, starting with initial_agents (list of dicts containing agent_id and task_id).
     Dynamically spawns runners for any children created during execution.
@@ -297,7 +297,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         print("[Supervisor] Cleaned up child processes.")
 
 
-def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=4):
+def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000):
     """
     Launches two agents assigned to the same task (redundancy test).
     If deconflict is enabled, applies goal deconfliction offsets to their files.
@@ -328,7 +328,7 @@ def main():
     parser.add_argument("--step-delay", type=float, default=2.0, help="Simulation step delay in seconds")
     parser.add_argument("--personalities", help="Comma-separated list of agent personalities/roles to initialize")
     parser.add_argument("--agents-config", help="JSON string representing starting agent configurations")
-    parser.add_argument("--budget", type=int, default=4, help="Maximum number of active agents in the swarm")
+    parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     args = parser.parse_args()
     
     if args.run_redundant:
