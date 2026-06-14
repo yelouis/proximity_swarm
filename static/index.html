@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Proximity Swarm V3 — Interactive web dashboard for coordinating autonomous agent swarms with real-time monitoring, collision detection, and intelligent task decomposition.">
+    <title>Proximity Swarm V3 — Web Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐝</text></svg>">
+</head>
+<body>
+
+<div id="app">
+    <!-- ═══════════ Top Bar ═══════════ -->
+    <header class="top-bar" id="top-bar">
+        <div class="top-bar__brand">
+            <span class="top-bar__logo">🐝</span>
+            <span class="top-bar__title">PROXIMITY SWARM</span>
+            <span class="top-bar__version">V3</span>
+        </div>
+        <div class="top-bar__actions">
+            <div id="status-pill" class="status-pill status-pill--idle">
+                <span class="status-pill__dot"></span>
+                <span id="status-label">IDLE</span>
+            </div>
+            <div class="dropdown" id="clean-dropdown">
+                <button class="icon-btn" id="clean-btn" title="Clean State" data-action="toggle-clean">⚙️</button>
+                <div class="dropdown__menu" id="clean-menu">
+                    <div class="dropdown__item" data-action="clean" data-target="logs">🗑️ Clean Logs</div>
+                    <div class="dropdown__item" data-action="clean" data-target="workspaces">📁 Clean Workspaces</div>
+                    <div class="dropdown__item" data-action="clean" data-target="collisions">⚡ Clean Collisions</div>
+                    <div class="dropdown__item" data-action="clean" data-target="tombstones">💀 Clean Tombstones</div>
+                    <div class="dropdown__item" data-action="clean" data-target="memory">🧠 Clean Memory</div>
+                    <div class="dropdown__divider"></div>
+                    <div class="dropdown__item dropdown__item--danger" data-action="clean" data-target="all">🔥 Clean Everything</div>
+                </div>
+            </div>
+            <button class="btn btn--primary btn--lg" id="launch-btn" data-action="open-launch">
+                🚀 New Swarm
+            </button>
+        </div>
+    </header>
+
+    <!-- ═══════════ Main Content ═══════════ -->
+    <main class="main-content" id="main-content">
+
+        <!-- ─── Left: Agent Sidebar ─── -->
+        <section class="panel sidebar" id="agent-sidebar">
+            <div class="panel__header">
+                <span class="panel__title">Agents</span>
+                <span class="panel__badge" id="agent-count">0</span>
+            </div>
+            <div class="panel__body" id="agent-list">
+                <div class="empty-state" id="agents-empty">
+                    <div class="empty-state__icon">🤖</div>
+                    <div class="empty-state__title">No Agents Yet</div>
+                    <div class="empty-state__desc">Launch a new swarm to see agents appear here.</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ─── Center: Main Viewport ─── -->
+        <section class="panel viewport" id="main-viewport">
+            <div class="viewport__tabs" id="viewport-tabs">
+                <div class="viewport__tab viewport__tab--active" data-tab="overview" data-action="switch-tab">Overview</div>
+                <div class="viewport__tab" data-tab="clusters" data-action="switch-tab">Cluster Map</div>
+                <div class="viewport__tab" data-tab="workspace" data-action="switch-tab">Workspace</div>
+                <div class="viewport__tab" data-tab="trace" data-action="switch-tab">Trace Graph</div>
+                <div class="viewport__tab" data-tab="memory" data-action="switch-tab">Memory</div>
+                <div class="viewport__tab" data-tab="logs" data-action="switch-tab">Logs</div>
+            </div>
+            <div class="viewport__content" id="viewport-content">
+                <!-- Dynamic content rendered by JS -->
+            </div>
+        </section>
+
+        <!-- ─── Right: Alerts & Activity ─── -->
+        <section class="panel alerts-panel" id="alerts-panel">
+            <div class="panel__header">
+                <span class="panel__title">Activity</span>
+                <span class="panel__badge" id="alerts-count">0</span>
+            </div>
+            <div class="panel__body" id="alerts-list">
+                <!-- Budget widget, decisions, collisions, tombstones rendered by JS -->
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ═══════════ Bottom Bar ═══════════ -->
+    <footer class="bottom-bar" id="bottom-bar">
+        <div class="command-bar">
+            <span class="command-bar__prompt">❯</span>
+            <input
+                type="text"
+                class="command-bar__input"
+                id="command-input"
+                placeholder="Enter a goal or command..."
+                autocomplete="off"
+                spellcheck="false"
+            >
+        </div>
+        <div class="log-tail" id="log-tail">
+            <div class="log-tail__line log-tail__line--info">Proximity Swarm V3 initialized. Ready.</div>
+        </div>
+    </footer>
+</div>
+
+<!-- ═══════════ Launch Swarm Modal ═══════════ -->
+<div class="modal-overlay" id="launch-modal">
+    <div class="modal">
+        <div class="modal__header">
+            <h2 class="modal__title">🚀 Launch New Swarm</h2>
+            <button class="icon-btn" data-action="close-launch">✕</button>
+        </div>
+        <div class="modal__body">
+            <div class="form-group">
+                <label class="form-label" for="launch-goal">Macro Goal</label>
+                <input type="text" class="form-input" id="launch-goal" placeholder="e.g. Implement JWT authentication with key rotation">
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="launch-budget">Output Token Budget Cap</label>
+                <input type="number" class="form-input" id="launch-budget" value="20000" min="100" step="100">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Agent Configuration</label>
+                <div class="agent-designer-list" id="designer-agents">
+                    <!-- Dynamic agent rows -->
+                </div>
+                <button class="btn btn--ghost" style="margin-top: var(--space-sm); width: 100%; justify-content: center;" data-action="add-designer-agent">
+                    + Add Agent
+                </button>
+            </div>
+        </div>
+        <div class="modal__footer">
+            <button class="btn" data-action="close-launch">Cancel</button>
+            <button class="btn btn--primary btn--lg" data-action="launch-swarm">🐝 Launch Swarm</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════ Agent Edit Slide Panel ═══════════ -->
+<div class="slide-panel" id="agent-edit-panel">
+    <div class="slide-panel__header">
+        <h2 class="slide-panel__title" id="edit-panel-title">Agent Details</h2>
+        <button class="icon-btn" data-action="close-edit">✕</button>
+    </div>
+    <div class="slide-panel__body" id="edit-panel-body">
+        <!-- Dynamic agent edit form -->
+    </div>
+    <div class="slide-panel__footer" id="edit-panel-footer">
+        <button class="btn" data-action="close-edit">Cancel</button>
+        <button class="btn btn--primary" data-action="save-agent">Save Changes</button>
+    </div>
+</div>
+
+<!-- ═══════════ Slide Panel Backdrop ═══════════ -->
+<div class="modal-overlay" id="slide-backdrop" data-action="close-edit"></div>
+
+<!-- ═══════════ Toast Container ═══════════ -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>
