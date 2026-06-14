@@ -1674,7 +1674,7 @@ def execute_dashboard_run(layout, supervisor_cmd):
 
     # Live loop updating layout components
     try:
-        with Live(layout, refresh_per_second=5, screen=True) as live:
+        with Live(layout, refresh_per_second=5, screen=True, redirect_stdin=False) as live:
             while sup_proc.poll() is None:
                 # 1. Update status/error message timer
                 if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
@@ -2196,7 +2196,7 @@ def run_swarm_designer(initial_list, overall_query, layout=None):
     }
 
     if layout:
-        with Live(layout, refresh_per_second=5, screen=True) as live:
+        with Live(layout, refresh_per_second=5, screen=True, redirect_stdin=False) as live:
             while True:
                 if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
                     prompt_state["error_msg"] = None
@@ -2698,7 +2698,7 @@ def run_tui_loop(layout, args):
         from datetime import timezone
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    with Live(layout, refresh_per_second=5, screen=True) as live:
+    with Live(layout, refresh_per_second=5, screen=True, redirect_stdin=False) as live:
         while True:
             # 1. Update status/error message timer
             if prompt_state["error_msg"] and time.time() - prompt_state["msg_timer"] > 2.0:
