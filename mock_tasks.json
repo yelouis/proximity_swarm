@@ -159,6 +159,162 @@
           ]
         }
       ]
+    },
+    "task_dynamic_1781412075_0": {
+      "id": "task_dynamic_1781412075_0",
+      "goal": "Analyze and synthesize the complete historical mathematical literature surrounding the Collatz Conjecture, identifying all known proofs, counterexamples, and related patterns.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Literature Review & Knowledge Graph Creation",
+          "description": "Conduct an exhaustive literature review of historical mathematical papers (journals, preprints like arXiv) concerning the Collatz Conjecture. Focus on identifying core structural arguments, major claimed proofs, and documented counterexample attempts. Compile this data into a structured knowledge graph or comprehensive markdown document detailing the evolution of research.",
+          "touched_files": [
+            "/temp/collatz_literature_survey.md",
+            "data/knowledge_graph.json"
+          ],
+          "tools": [
+            "search_database",
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Proof and Pattern Extraction (Deep Dive)",
+          "description": "Systematically analyze the collected literature to categorize every proposed proof structure (e.g., fixed point analysis, ergodic theory applications). Specifically extract mathematical definitions, parameters, assumed axioms, and the precise nature of all identified patterns or cycles. Cross-reference these claims with known constraints and limitations.",
+          "touched_files": [
+            "/temp/proof_analysis.md",
+            "data/patterns_and_limits.json"
+          ],
+          "tools": [
+            "run_python",
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Synthesis and Comparative Analysis",
+          "description": "Synthesize the findings from Steps 1 and 2 into a cohesive analysis. Compare conflicting claims regarding proofs (e.g., proof A vs. rebuttal B). Identify gaps in current mathematical knowledge or unproven assumptions across the entire history of research related to the conjecture.",
+          "touched_files": [
+            "/temp/synthesis_draft.md",
+            "data/comparative_analysis.json"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Final Report Generation and Formatting",
+          "description": "Compile all analyzed data (literature survey, proof structures, patterns, gaps) into a final, comprehensive report. Structure the output to clearly delineate Known Proofs, Hypothetical Proofs/Structures, Proven Patterns, Confirmed Counterexamples, and Unresolved Open Questions regarding the Collatz Conjecture.",
+          "touched_files": [
+            "output.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ]
+    },
+    "task_dynamic_1781412075_1": {
+      "id": "task_dynamic_1781412075_1",
+      "goal": "Formalize the conjecture using advanced mathematical logic (e.g., dynamical systems, number theory) to create a rigorous, verifiable model.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Literature Review and Scope Definition",
+          "description": "Identify the core mathematical structures required to formalize the conjecture. This involves a deep review of advanced literature in the relevant fields (dynamical systems, number theory) to select the most appropriate formalism (e.g., Poincar\u00e9 sections, elliptic curves, p-adic analysis). The output must be a structured proposal outlining the chosen model type and its variables/assumptions.",
+          "touched_files": [
+            "src/conjecture_formalization/scope_proposal.md"
+          ],
+          "tools": [
+            "edit_file",
+            "read_data"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Model Construction and Notation Definition",
+          "description": "Based on the scope proposal, construct the mathematical model. This involves defining the system equations (e.g., differential or difference equations) and rigorously defining all necessary variables, parameters, boundary conditions, and measure theory frameworks. All notation must be standardized and fully documented.",
+          "touched_files": [
+            "src/conjecture_formalization/model_equations.tex",
+            "src/conjecture_formalization/notation.md"
+          ],
+          "tools": [
+            "edit_file",
+            "run_latex"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Verification Strategy and Proof Attempt",
+          "description": "Develop a multi-pronged strategy for proving or disproving the conjecture within the chosen model. This includes selecting necessary verification techniques (e.g., numerical simulations, algebraic invariant computations, theoretical bounds). Implement initial code or symbolic proofs to test key aspects of the model's behavior.",
+          "touched_files": [
+            "src/conjecture_formalization/verification_script.py",
+            "src/conjecture_formalization/proof_attempt.md"
+          ],
+          "tools": [
+            "edit_file",
+            "run_python"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Final Report Generation and Rigor Check",
+          "description": "Synthesize all findings into a single, highly rigorous report. This final document must contain the finalized mathematical model, the full proof attempt (including counterexamples or verification proofs), and detailed appendices describing assumptions and limitations. The output must be verifiable documentation ready for peer review.",
+          "touched_files": [
+            "output/final_formalization_report.md"
+          ],
+          "tools": [
+            "edit_file",
+            "read_data"
+          ]
+        }
+      ]
+    },
+    "task_dynamic_1781412075_2": {
+      "id": "task_dynamic_1781412075_2",
+      "goal": "Develop and execute multiple novel theoretical frameworks (e.g., ergodic theory, advanced analysis) capable of establishing the conjecture's truth or identifying its necessary exceptions.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Literature Review and Framework Selection",
+          "description": "Perform a deep dive review into existing literature related to the conjecture's core mathematical area. Identify key methodologies (e.g., harmonic analysis, measure theory, specific advanced analytical techniques) that could form the basis of novel theoretical frameworks. Select 2-3 promising, mathematically distinct theories (e.g., ergodic theory approach, functional analytic approach, generalized measure theory approach) to focus on for formal development.",
+          "touched_files": [
+            "research/lit_review.md",
+            "frameworks/theory_selection.txt"
+          ],
+          "tools": [
+            "search_database",
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Formal Framework Development and Hypothesis Generation",
+          "description": "For each selected theoretical framework, the agents must formally define the necessary mathematical structures, axioms, and hypotheses required to address the conjecture. This involves deriving specialized theorems or conditions under which the conjecture holds true (proving truth) or systematically generating counter-examples/necessary exceptions by modifying core assumptions. Results must be compiled into preliminary formal proofs/exceptions.",
+          "touched_files": [
+            "drafts/framework_A_proof.tex",
+            "drafts/framework_B_analysis.tex",
+            "exceptions/potential_counterexamples.md"
+          ],
+          "tools": [
+            "edit_file",
+            "latex_compiler"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Critical Synthesis and Conjecture Status Report",
+          "description": "Critically evaluate the findings from all developed frameworks. Synthesize the successes (proofs of truth under certain conditions) and failures (identification of necessary exceptions/counterexamples). The final step requires drafting a comprehensive report that summarizes whether the conjecture is proven generally, proven conditionally, or found to be false with explicit counterexample classes. This summary must be saved for visualization.",
+          "touched_files": [
+            "reports/final_conjecture_status.md"
+          ],
+          "tools": [
+            "edit_file",
+            "validate_math"
+          ]
+        }
+      ]
     }
   }
 }

@@ -369,13 +369,21 @@ class AgentRunner:
         self.load_historical_context()
 
     def apply_offset_to_files(self, files):
-        if not self.offset_suffix:
-            return list(files)
         result = []
         for f in files:
-            base, ext = os.path.splitext(f)
-            result.append(f"{base}_{self.offset_suffix}{ext}")
+            # Clean and sanitize the path to keep it relative and safe
+            clean_f = f.lstrip('/')
+            clean_f = os.path.normpath(clean_f)
+            if clean_f.startswith("..") or os.path.isabs(clean_f):
+                clean_f = os.path.basename(clean_f)
+                
+            if not self.offset_suffix:
+                result.append(clean_f)
+            else:
+                base, ext = os.path.splitext(clean_f)
+                result.append(f"{base}_{self.offset_suffix}{ext}")
         return result
+
 
     def load_or_init_state(self):
         state = load_json(self.state_file)
