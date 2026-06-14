@@ -2525,6 +2525,14 @@ def main():
         TUI_SUPERVISOR_CMD = supervisor_cmd
         synthesis_cache.update({"last_hash": None, "content": None, "is_generating": False})
         
+    try:
+        run_tui_loop(layout, args)
+    except (KeyboardInterrupt, EOFError):
+        os.system("clear")
+        print("\n" + "="*50)
+        print("    Terminal Dashboard Session Terminated")
+        print("="*50 + "\n")
+
 def run_swarm_workflow(user_input, layout, args):
     # Decompose goal into sub-swarms first
     orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
@@ -3246,15 +3254,6 @@ def run_tui_loop(layout, args):
             except select.error:
                 pass
             time.sleep(0.05)
-
-
-    try:
-        run_tui_loop(layout, args)
-    except (KeyboardInterrupt, EOFError):
-        os.system("clear")
-        print("\n" + "="*50)
-        print("    Terminal Dashboard Session Terminated")
-        print("="*50 + "\n")
 
 
 if __name__ == "__main__":
