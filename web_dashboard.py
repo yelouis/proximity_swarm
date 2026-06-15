@@ -585,12 +585,118 @@ def handle_edit_agent(agent_id, updates):
     data = load_json(filepath)
     if not data:
         return False, "Agent not found"
-    for key in ("goal", "role", "personality", "status"):
+    for key in ("goal", "role", "personality", "status", "token_budget", "subtree_token_budget"):
         if key in updates:
             data[key] = updates[key]
     save_json(filepath, data)
     write_to_monitor_log(f"Agent {agent_id} updated via web UI: {updates}", "INFO")
     return True, "Agent updated"
+
+
+def handle_chat_message(agent_id, message):
+    """Append a user chat message to the agent's chat_messages array."""
+    filepath = os.path.join(AGENTS_DIR, f"agent_{agent_id}.json")
+    data = load_json(filepath)
+    if not data:
+        return False, "Agent not found"
+    if "chat_messages" not in data:
+        data["chat_messages"] = []
+    data["chat_messages"].append({
+        "role": "user",
+        "content": message,
+        "timestamp": time.time(),
+        "processed": False,
+    })
+    save_json(filepath, data)
+    write_to_monitor_log(f"Chat message sent to Agent {agent_id}: {message[:80]}...", "INFO")
+    return True, "Message sent"
+
+
+def get_chat_messages(agent_id):
+    """Return the agent's chat_messages array."""
+    filepath = os.path.join(AGENTS_DIR, f"agent_{agent_id}.json")
+    data = load_json(filepath)
+    if not data:
+        return []
+    return data.get("chat_messages", [])
+
+
+def handle_set_agent_budget(agent_id, token_budget=None, subtree_token_budget=None):
+    """Set per-node and/or subtree token budget for a specific agent."""
+    filepath = os.path.join(AGENTS_DIR, f"agent_{agent_id}.json")
+    data = load_json(filepath)
+    if not data:
+        return False, "Agent not found"
+    if token_budget is not None:
+        data["token_budget"] = int(token_budget)
+    if subtree_token_budget is not None:
+        data["subtree_token_budget"] = int(subtree_token_budget)
+    save_json(filepath, data)
+    write_to_monitor_log(f"Budget set for Agent {agent_id}: node={token_budget}, subtree={subtree_token_budget}", "INFO")
+    return True, "Budget updated"
+
+
+def handle_redistribute_budget(parent_id, strategy="equal"):
+    """Redistribute a parent's subtree budget among its children."""
+    all_agents = get_all_agents()
+    parent = None
+    for a in all_agents:
+        if a.get("id") == parent_id:
+            parent = a
+            break
+    if not parent:
+        return False, "Parent agent not found"
+
+    children = [a for a in all_agents if a.get("parent_id") == parent_id
+                and a.get("status") not in ("completed", "dead")]
+    if not children:
+        return False, "No active children to redistribute to"
+
+    subtree_budget = parent.get("subtree_token_budget", server_state["session_budget"])
+    parent_used = parent.get("output_tokens", 0)
+    remaining = max(subtree_budget - parent_used, 0)
+
+    if strategy == "equal":
+        per_child = remaining // len(children) if children else remaining
+        for child in children:
+            filepath = os.path.join(AGENTS_DIR, f"agent_{child['id']}.json")
+            cdata = load_json(filepath)
+            if cdata:
+                cdata["token_budget"] = per_child
+                cdata["subtree_token_budget"] = per_child
+                save_json(filepath, cdata)
+    elif strategy == "weighted":
+        # Allocate more to agents closer to completion
+        total_progress = sum(a.get("progress", 0) or 0 for a in children)
+        if total_progress == 0:
+            total_progress = len(children)  # fallback to equal
+            weights = [1] * len(children)
+        else:
+            weights = [(a.get("progress", 0) or 0) for a in children]
+        weight_sum = sum(weights) or 1
+        for i, child in enumerate(children):
+            share = int(remaining * weights[i] / weight_sum)
+            filepath = os.path.join(AGENTS_DIR, f"agent_{child['id']}.json")
+            cdata = load_json(filepath)
+            if cdata:
+                cdata["token_budget"] = share
+                cdata["subtree_token_budget"] = share
+                save_json(filepath, cdata)
+    elif strategy == "priority":
+        # Use priority_weight field if set, else default to 1
+        weights = [a.get("priority_weight", 1) for a in children]
+        weight_sum = sum(weights) or 1
+        for i, child in enumerate(children):
+            share = int(remaining * weights[i] / weight_sum)
+            filepath = os.path.join(AGENTS_DIR, f"agent_{child['id']}.json")
+            cdata = load_json(filepath)
+            if cdata:
+                cdata["token_budget"] = share
+                cdata["subtree_token_budget"] = share
+                save_json(filepath, cdata)
+
+    write_to_monitor_log(f"Budget redistributed for children of Agent {parent_id} using '{strategy}' strategy. Remaining pool: {remaining}", "INFO")
+    return True, f"Redistributed {remaining} tokens among {len(children)} children using {strategy} strategy"
 
 # ---------------------------------------------------------------------------
 # HTTP Request Handler
@@ -664,6 +770,9 @@ class SwarmRequestHandler(BaseHTTPRequestHandler):
             return self.send_json(get_full_state())
         if path == "/api/agents":
             return self.send_json(get_all_agents())
+        if path.startswith("/api/agents/") and path.endswith("/chat"):
+            agent_id = path.split("/api/agents/")[1].replace("/chat", "")
+            return self.send_json(get_chat_messages(agent_id))
         if path.startswith("/api/agents/"):
             agent_id = path.split("/api/agents/")[1]
             data = get_agent(agent_id)
@@ -753,6 +862,31 @@ class SwarmRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/agents/") and path.endswith("/edit"):
             agent_id = path.split("/api/agents/")[1].replace("/edit", "")
             ok, msg = handle_edit_agent(agent_id, body)
+            return self.send_json({"success": ok, "message": msg})
+
+        if path.startswith("/api/agents/") and path.endswith("/chat"):
+            agent_id = path.split("/api/agents/")[1].replace("/chat", "")
+            message = body.get("message", "")
+            if not message:
+                return self.send_json({"error": "Message is required"}, 400)
+            ok, msg = handle_chat_message(agent_id, message)
+            return self.send_json({"success": ok, "message": msg})
+
+        if path.startswith("/api/agents/") and path.endswith("/budget"):
+            agent_id = path.split("/api/agents/")[1].replace("/budget", "")
+            ok, msg = handle_set_agent_budget(
+                agent_id,
+                token_budget=body.get("token_budget"),
+                subtree_token_budget=body.get("subtree_token_budget"),
+            )
+            return self.send_json({"success": ok, "message": msg})
+
+        if path == "/api/budget/redistribute":
+            parent_id = body.get("parent_id", "")
+            strategy = body.get("strategy", "equal")
+            if not parent_id:
+                return self.send_json({"error": "parent_id is required"}, 400)
+            ok, msg = handle_redistribute_budget(parent_id, strategy)
             return self.send_json({"success": ok, "message": msg})
 
         self.send_json({"error": "Not found"}, 404)

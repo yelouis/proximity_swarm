@@ -230,6 +230,7 @@ function renderAlertsPanel() {
     let html = '';
 
     // Budget Widget
+    // Budget Widget — Global
     const maxTokens = budgetAlert.active_count || getMaxLeafTokens();
     const budgetCap = SwarmState.session_budget || 20000;
     const budgetPct = Math.min((maxTokens / budgetCap) * 100, 100);
@@ -237,9 +238,9 @@ function renderAlertsPanel() {
 
     html += `
         <div class="budget-widget">
-            <div class="budget-widget__label">Output Token Budget</div>
+            <div class="budget-widget__label">Global Token Budget</div>
             <div class="budget-widget__value ${budgetExceeded ? 'budget-widget__value--exceeded' : ''}"
-                 data-action="edit-budget" title="Click to edit budget cap">
+                 data-action="edit-budget" title="Click to edit global budget cap">
                 ${maxTokens.toLocaleString()} / ${budgetCap.toLocaleString()}
             </div>
             <div class="budget-widget__bar">
@@ -247,6 +248,54 @@ function renderAlertsPanel() {
             </div>
         </div>
     `;
+
+    // Per-Agent Budget Tree
+    const perAgentStatus = budgetAlert.per_agent_status || [];
+    if (perAgentStatus.length > 0 || SwarmState.agents.length > 0) {
+        html += '<div class="budget-tree">';
+        html += '<div class="budget-tree__section-label">Per-Agent Budget</div>';
+
+        const agentBudgetData = perAgentStatus.length > 0 ? perAgentStatus :
+            SwarmState.agents
+                .filter(a => ['exploring', 'syncing', 'pending_termination'].includes(a.status))
+                .map(a => ({
+                    id: a.id,
+                    output_tokens: a.output_tokens || 0,
+                    token_budget: a.token_budget || budgetCap,
+                    pct: Math.round(((a.output_tokens || 0) / Math.max(a.token_budget || budgetCap, 1)) * 100),
+                }));
+
+        for (const agentBdg of agentBudgetData) {
+            const pct = Math.min(agentBdg.pct || 0, 100);
+            const colorClass = pct > 90 ? 'red' : pct > 60 ? 'amber' : 'green';
+            const nodeClass = pct > 90 ? 'budget-tree__node--exceeded' : pct > 60 ? 'budget-tree__node--warning' : 'budget-tree__node--ok';
+            html += `
+                <div class="budget-tree__node ${nodeClass}">
+                    <div class="budget-tree__header">
+                        <span class="budget-tree__id">Agent ${escapeHtml(agentBdg.id)}</span>
+                        <span class="budget-tree__value budget-tree__value--${colorClass}">${(agentBdg.output_tokens || 0).toLocaleString()} / ${(agentBdg.token_budget || budgetCap).toLocaleString()}</span>
+                    </div>
+                    <div class="budget-tree__bar">
+                        <div class="budget-tree__bar-fill budget-tree__bar-fill--${colorClass}" style="width: ${pct}%"></div>
+                    </div>
+                    <span class="budget-tree__action" data-action="edit-agent-budget" data-agent-id="${agentBdg.id}">✏️ Set budget</span>
+                </div>
+            `;
+        }
+
+        // Subtree alerts
+        const subtreeAlerts = budgetAlert.subtree_alerts || [];
+        for (const sa of subtreeAlerts) {
+            html += `
+                <div class="subtree-alert">
+                    ⚠ Subtree budget exceeded for Agent ${escapeHtml(sa.parent_id)}: 
+                    ${(sa.subtree_used || 0).toLocaleString()} / ${(sa.subtree_budget || 0).toLocaleString()} (${sa.pct}%)
+                </div>
+            `;
+        }
+
+        html += '</div>';
+    }
 
     if (budgetExceeded) {
         html += `
@@ -658,13 +707,20 @@ function renderClustersTab(container) {
             statusClass += ' node--selected';
         }
 
+        // Budget color-coding
+        const agentBudget = agent.token_budget || (SwarmState.session_budget || 20000);
+        const agentTokens = agent.output_tokens || 0;
+        const budgetPctCluster = Math.min(Math.round((agentTokens / Math.max(agentBudget, 1)) * 100), 100);
+        const budgetColorClass = budgetPctCluster > 90 ? 'budget--red' : budgetPctCluster > 60 ? 'budget--amber' : 'budget--green';
+
         const role = escapeHtml(truncate(agent.personality || agent.role || 'Generalist', 20));
         const goalSnippet = escapeHtml(truncate(agent.goal || '', 24));
+        const budgetLabel = `${agentTokens.toLocaleString()}/${agentBudget.toLocaleString()} (${budgetPctCluster}%)`;
 
         svgHtml += `
             <g class="cluster-node" data-agent-id="${agent.id}">
                 <g class="cluster-node-g">
-                    <circle class="cluster-node-circle ${statusClass}" cx="${node.x}" cy="${node.y}" r="22" />
+                    <circle class="cluster-node-circle ${statusClass} ${budgetColorClass}" cx="${node.x}" cy="${node.y}" r="22" />
                     <text class="cluster-node-text" x="${node.x}" y="${node.y}">${agent.id}</text>
                     
                     <text x="${node.x}" y="${node.y + 36}" 
@@ -678,6 +734,10 @@ function renderClustersTab(container) {
                     <text x="${node.x}" y="${node.y + 58}" 
                           style="font-family: var(--font-sans); font-size: 8px; fill: var(--text-muted); opacity: 0.7; text-anchor: middle; font-style: italic;">
                           "${goalSnippet}"
+                    </text>
+                    <text x="${node.x}" y="${node.y + 68}" 
+                          style="font-family: var(--font-mono); font-size: 7px; fill: ${budgetPctCluster > 90 ? 'var(--accent-red)' : budgetPctCluster > 60 ? 'var(--accent-amber)' : 'var(--accent-green)'}; text-anchor: middle; opacity: 0.8;">
+                          🔋 ${budgetLabel}
                     </text>
                 </g>
             </g>
@@ -1191,6 +1251,97 @@ function openEditPanel(agentId) {
         stepsHtml += '</div></div>';
     }
 
+    // Budget section
+    const nodeBudget = agent.token_budget || SwarmState.session_budget || 20000;
+    const subtreeBudget = agent.subtree_token_budget || null;
+    const usedTokens = agent.output_tokens || 0;
+    const budgetPctNode = Math.min(Math.round((usedTokens / Math.max(nodeBudget, 1)) * 100), 100);
+    const budgetColorNode = budgetPctNode > 90 ? 'red' : budgetPctNode > 60 ? 'amber' : 'green';
+
+    // Check if this agent has children
+    const allAgents = SwarmState.agents;
+    const hasChildren = allAgents.some(a => a.parent_id === agentId && !['completed', 'dead'].includes(a.status));
+
+    let budgetHtml = `
+        <div class="form-group">
+            <label class="form-label">Token Budget</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm);">
+                <div>
+                    <div style="font-size: 0.68rem; color: var(--text-muted); margin-bottom: 2px;">Node Budget</div>
+                    <input type="number" class="form-input" id="edit-node-budget" value="${nodeBudget}" min="100" step="100"
+                           style="font-family: var(--font-mono); font-size: 0.8rem;">
+                </div>
+                <div>
+                    <div style="font-size: 0.68rem; color: var(--text-muted); margin-bottom: 2px;">Subtree Budget</div>
+                    <input type="number" class="form-input" id="edit-subtree-budget" value="${subtreeBudget || ''}" min="100" step="100"
+                           placeholder="Inherit global" style="font-family: var(--font-mono); font-size: 0.8rem;">
+                </div>
+            </div>
+            <div style="margin-top: var(--space-sm);">
+                <div class="budget-tree__bar" style="height: 4px;">
+                    <div class="budget-tree__bar-fill budget-tree__bar-fill--${budgetColorNode}" style="width: ${budgetPctNode}%"></div>
+                </div>
+                <div style="font-size: 0.68rem; color: var(--text-muted); margin-top: 2px;">
+                    Used: ${usedTokens.toLocaleString()} / ${nodeBudget.toLocaleString()} (${budgetPctNode}%)
+                </div>
+            </div>
+    `;
+
+    if (hasChildren) {
+        budgetHtml += `
+            <div style="margin-top: var(--space-md); border-top: 1px solid var(--border-secondary); padding-top: var(--space-sm);">
+                <div style="font-size: 0.68rem; font-weight: 600; color: var(--text-secondary); margin-bottom: var(--space-xs);">Redistribute Among Children</div>
+                <div style="display: flex; gap: var(--space-xs); flex-wrap: wrap;">
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="equal" title="Split equally among children">⚖️ Equal</button>
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="weighted" title="Proportional to progress">📊 Weighted</button>
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="priority" title="Based on priority weights">🎯 Priority</button>
+                </div>
+            </div>
+        `;
+    }
+
+    budgetHtml += `</div>`;
+
+    // Chat messages
+    const chatMessages = agent.chat_messages || [];
+    let chatHtml = `
+        <div class="chat-panel">
+            <div class="chat-panel__title">
+                <span class="chat-panel__title-icon">💬</span>
+                Operator Chat
+                ${chatMessages.filter(m => !m.processed).length > 0 ? `<span class="chat-message__pending">${chatMessages.filter(m => !m.processed).length} pending</span>` : ''}
+            </div>
+            <div class="chat-panel__messages" id="chat-messages-list">
+    `;
+    if (chatMessages.length === 0) {
+        chatHtml += `<div class="chat-panel__empty">No messages yet. Send a directive to guide this agent.</div>`;
+    } else {
+        for (const msg of chatMessages) {
+            const time = new Date(msg.timestamp * 1000).toLocaleTimeString();
+            const roleClass = msg.role === 'user' ? 'chat-message--user' : 'chat-message--system';
+            chatHtml += `
+                <div class="chat-message ${roleClass}">
+                    <div class="chat-message__bubble">${escapeHtml(msg.content)}</div>
+                    <div class="chat-message__meta">
+                        <span>${msg.role === 'user' ? 'You' : 'Agent'}</span>
+                        <span>·</span>
+                        <span>${time}</span>
+                        ${!msg.processed && msg.role === 'user' ? '<span class="chat-message__pending">pending</span>' : ''}
+                        ${msg.processed && msg.role === 'user' ? '<span style="color: var(--accent-green);">✓ delivered</span>' : ''}
+                    </div>
+                </div>
+            `;
+        }
+    }
+    chatHtml += `
+            </div>
+            <div class="chat-input-bar">
+                <input type="text" class="chat-input-bar__input" id="chat-input" placeholder="Send directive to Agent ${agentId}..." autocomplete="off">
+                <button class="chat-input-bar__send" data-action="send-chat" data-agent-id="${agentId}">Send</button>
+            </div>
+        </div>
+    `;
+
     body.innerHTML = `
         <div class="form-group">
             <label class="form-label">Status</label>
@@ -1210,6 +1361,7 @@ function openEditPanel(agentId) {
             <label class="form-label" for="edit-goal">Goal</label>
             <textarea class="form-textarea" id="edit-goal" rows="4">${escapeHtml(agent.goal || '')}</textarea>
         </div>
+        ${budgetHtml}
         <div class="form-group">
             <label class="form-label">Progress</label>
             <div class="progress-bar" style="height: 8px;"><div class="progress-bar__fill" style="width: ${computeProgress(agent)}%"></div></div>
@@ -1222,10 +1374,26 @@ function openEditPanel(agentId) {
                 ${(agent.touched_files || []).map(f => `<div>📄 ${escapeHtml(f)}</div>`).join('') || '<div style="color: var(--text-muted);">No files yet</div>'}
             </div>
         </div>
+        ${chatHtml}
     `;
 
     panel.classList.add('slide-panel--active');
     backdrop.classList.add('modal-overlay--active');
+
+    // Auto-scroll chat to bottom
+    const chatList = document.getElementById('chat-messages-list');
+    if (chatList) chatList.scrollTop = chatList.scrollHeight;
+
+    // Wire chat input Enter key
+    const chatInput = document.getElementById('chat-input');
+    if (chatInput) {
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChatMessage(agentId);
+            }
+        });
+    }
 }
 
 function closeEditPanel() {
@@ -1234,14 +1402,43 @@ function closeEditPanel() {
     document.getElementById('slide-backdrop').classList.remove('modal-overlay--active');
 }
 
+async function sendChatMessage(agentId) {
+    const input = document.getElementById('chat-input');
+    if (!input) return;
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = '';
+
+    const result = await apiPost(`/api/agents/${agentId}/chat`, { message });
+    if (result.success) {
+        showToast(`Message sent to Agent ${agentId}`, 'success');
+        // Re-open panel to refresh chat
+        openEditPanel(agentId);
+    } else {
+        showToast(result.message || 'Failed to send message', 'error');
+    }
+}
+
 async function saveAgentEdits() {
     if (!UIState.editingAgentId) return;
     const role = document.getElementById('edit-role').value;
     const goal = document.getElementById('edit-goal').value;
-    const result = await apiPost(`/api/agents/${UIState.editingAgentId}/edit`, {
+    const nodeBudgetInput = document.getElementById('edit-node-budget');
+    const subtreeBudgetInput = document.getElementById('edit-subtree-budget');
+
+    const updates = {
         personality: role,
         goal: goal,
-    });
+    };
+
+    if (nodeBudgetInput && nodeBudgetInput.value) {
+        updates.token_budget = parseInt(nodeBudgetInput.value);
+    }
+    if (subtreeBudgetInput && subtreeBudgetInput.value) {
+        updates.subtree_token_budget = parseInt(subtreeBudgetInput.value);
+    }
+
+    const result = await apiPost(`/api/agents/${UIState.editingAgentId}/edit`, updates);
     if (result.success) {
         showToast(`Agent ${UIState.editingAgentId} updated`, 'success');
         closeEditPanel();
@@ -1380,6 +1577,59 @@ function editBudget(targetEl) {
     });
 }
 
+function editAgentBudgetInline(targetEl) {
+    const agentId = targetEl.dataset.agentId;
+    const agent = SwarmState.agents.find(a => a.id === agentId);
+    const currentBudget = agent ? (agent.token_budget || SwarmState.session_budget || 20000) : 20000;
+    
+    const parentNode = targetEl.closest('.budget-tree__node');
+    if (!parentNode) return;
+
+    // Replace the action link with an inline editor
+    const actionEl = parentNode.querySelector('.budget-tree__action');
+    if (!actionEl) return;
+
+    actionEl.outerHTML = `
+        <div class="budget-inline-editor">
+            <input type="number" id="inline-budget-${agentId}" value="${currentBudget}" min="100" step="100">
+            <button class="btn btn--primary btn--sm" style="padding: 0 6px; height: 22px; font-size: 0.62rem;"
+                    onclick="saveInlineAgentBudget('${agentId}')">Save</button>
+            <button class="btn btn--ghost btn--sm" style="padding: 0 4px; height: 22px; font-size: 0.62rem;"
+                    onclick="render()">✕</button>
+        </div>
+    `;
+
+    const input = document.getElementById(`inline-budget-${agentId}`);
+    if (input) {
+        input.focus();
+        input.select();
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') saveInlineAgentBudget(agentId);
+            if (e.key === 'Escape') render();
+        });
+    }
+}
+
+async function saveInlineAgentBudget(agentId) {
+    const input = document.getElementById(`inline-budget-${agentId}`);
+    if (!input) return;
+    const val = parseInt(input.value);
+    if (isNaN(val) || val < 100) {
+        showToast('Budget must be at least 100', 'error');
+        return;
+    }
+    const result = await apiPost(`/api/agents/${agentId}/budget`, { token_budget: val });
+    if (result.success) {
+        showToast(`Agent ${agentId} budget set to ${val.toLocaleString()}`, 'success');
+        // Update local state
+        const agent = SwarmState.agents.find(a => a.id === agentId);
+        if (agent) agent.token_budget = val;
+        render();
+    } else {
+        showToast(result.message || 'Failed to set budget', 'error');
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event Delegation
 // ---------------------------------------------------------------------------
@@ -1486,6 +1736,27 @@ document.addEventListener('click', (e) => {
                 showToast(r.success ? `Cleaned: ${(r.cleaned || []).join(', ')}` : 'Clean failed', r.success ? 'success' : 'error');
             });
             break;
+        case 'send-chat':
+            e.stopPropagation();
+            sendChatMessage(target.dataset.agentId);
+            break;
+        case 'edit-agent-budget':
+            e.stopPropagation();
+            editAgentBudgetInline(target);
+            break;
+        case 'redistribute-budget':
+            e.stopPropagation();
+            {
+                const parentId = target.dataset.parentId;
+                const strategy = target.dataset.strategy;
+                apiPost('/api/budget/redistribute', { parent_id: parentId, strategy }).then(r => {
+                    showToast(r.success ? r.message : (r.message || 'Redistribution failed'), r.success ? 'success' : 'error');
+                    if (r.success && UIState.editingAgentId) {
+                        openEditPanel(UIState.editingAgentId);
+                    }
+                });
+            }
+            break;
     }
 });
 
@@ -1522,6 +1793,21 @@ document.getElementById('command-input').addEventListener('keydown', (e) => {
         const input = e.target.value.trim();
         if (!input) return;
         e.target.value = '';
+
+        // Handle @agent_id message syntax for chat
+        const chatMatch = input.match(/^@(\w+)\s+(.+)$/);
+        if (chatMatch) {
+            const agentId = chatMatch[1];
+            const message = chatMatch[2];
+            apiPost(`/api/agents/${agentId}/chat`, { message }).then(r => {
+                if (r.success) {
+                    showToast(`💬 Message sent to Agent ${agentId}`, 'success');
+                } else {
+                    showToast(r.message || `Failed to send to Agent ${agentId}`, 'error');
+                }
+            });
+            return;
+        }
 
         // If not running, treat as a launch command
         if (!SwarmState.swarm_running && !input.startsWith('/')) {

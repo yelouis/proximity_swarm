@@ -1387,3 +1387,380 @@ a:hover { text-decoration: underline; }
     stroke-width: 3.5px !important;
     filter: drop-shadow(0 0 5px rgba(88, 166, 255, 0.5)) !important;
 }
+
+/* ================================================================
+   Chat Panel Styles
+   ================================================================ */
+
+.chat-panel {
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--border-primary);
+    margin-top: var(--space-lg);
+    padding-top: var(--space-md);
+}
+
+.chat-panel__title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-sm);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.chat-panel__title-icon {
+    font-size: 0.85rem;
+}
+
+.chat-panel__messages {
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    padding: var(--space-sm);
+    margin-bottom: var(--space-sm);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-secondary);
+}
+
+.chat-panel__messages::-webkit-scrollbar {
+    width: 4px;
+}
+
+.chat-panel__messages::-webkit-scrollbar-thumb {
+    background: var(--border-primary);
+    border-radius: 2px;
+}
+
+.chat-message {
+    display: flex;
+    flex-direction: column;
+    max-width: 90%;
+    animation: chatFadeIn 0.3s ease;
+}
+
+@keyframes chatFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-message--user {
+    align-self: flex-end;
+}
+
+.chat-message--system {
+    align-self: flex-start;
+}
+
+.chat-message__bubble {
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    font-size: 0.78rem;
+    line-height: 1.45;
+    word-wrap: break-word;
+}
+
+.chat-message--user .chat-message__bubble {
+    background: var(--accent-blue-dim);
+    border: 1px solid rgba(0, 122, 204, 0.25);
+    color: var(--accent-cyan);
+    border-bottom-right-radius: 2px;
+}
+
+.chat-message--system .chat-message__bubble {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-primary);
+    color: var(--text-secondary);
+    border-bottom-left-radius: 2px;
+}
+
+.chat-message__meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+    padding: 0 var(--space-xs);
+}
+
+.chat-message--user .chat-message__meta {
+    justify-content: flex-end;
+}
+
+.chat-message__pending {
+    display: inline-block;
+    background: var(--accent-amber-dim);
+    color: var(--accent-amber);
+    font-size: 0.56rem;
+    font-weight: 600;
+    padding: 0 4px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.chat-panel__empty {
+    text-align: center;
+    padding: var(--space-lg);
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-style: italic;
+}
+
+.chat-input-bar {
+    display: flex;
+    gap: var(--space-xs);
+    align-items: stretch;
+}
+
+.chat-input-bar__input {
+    flex: 1;
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    outline: none;
+    transition: border-color 0.2s ease;
+}
+
+.chat-input-bar__input:focus {
+    border-color: var(--accent-blue);
+}
+
+.chat-input-bar__input::placeholder {
+    color: var(--text-muted);
+}
+
+.chat-input-bar__send {
+    padding: var(--space-sm) var(--space-md);
+    background: var(--accent-blue);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-inverse);
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.chat-input-bar__send:hover {
+    background: var(--accent-blue-hover);
+}
+
+.chat-input-bar__send:active {
+    transform: scale(0.96);
+}
+
+/* ================================================================
+   Budget Tree Styles
+   ================================================================ */
+
+.budget-tree {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.budget-tree__section-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin-top: var(--space-sm);
+    margin-bottom: var(--space-xs);
+    padding-bottom: var(--space-xs);
+    border-bottom: 1px solid var(--border-secondary);
+}
+
+.budget-tree__node {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    padding: var(--space-sm) var(--space-md);
+    transition: all 0.2s ease;
+}
+
+.budget-tree__node:hover {
+    border-color: var(--accent-blue-dim);
+    background: var(--bg-hover);
+}
+
+.budget-tree__node--exceeded {
+    border-left: 2px solid var(--accent-red);
+}
+
+.budget-tree__node--warning {
+    border-left: 2px solid var(--accent-amber);
+}
+
+.budget-tree__node--ok {
+    border-left: 2px solid var(--accent-green);
+}
+
+.budget-tree__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.budget-tree__id {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--accent-cyan);
+}
+
+.budget-tree__value {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+}
+
+.budget-tree__value--green { color: var(--accent-green); }
+.budget-tree__value--amber { color: var(--accent-amber); }
+.budget-tree__value--red { color: var(--accent-red); }
+
+.budget-tree__bar {
+    height: 3px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.budget-tree__bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease, background 0.3s ease;
+}
+
+.budget-tree__bar-fill--green { background: var(--accent-green); }
+.budget-tree__bar-fill--amber { background: var(--accent-amber); }
+.budget-tree__bar-fill--red { background: var(--accent-red); }
+
+.budget-tree__action {
+    font-size: 0.62rem;
+    color: var(--accent-blue);
+    cursor: pointer;
+    padding: 2px 0;
+    display: inline-block;
+    margin-top: 2px;
+}
+
+.budget-tree__action:hover {
+    color: var(--accent-blue-hover);
+    text-decoration: underline;
+}
+
+/* Budget editor inline */
+.budget-inline-editor {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.budget-inline-editor input {
+    width: 80px;
+    padding: 2px 6px;
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    height: 22px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    outline: none;
+}
+
+.budget-inline-editor input:focus {
+    border-color: var(--accent-blue);
+}
+
+/* Redistribute strategy selector */
+.strategy-selector {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    padding: var(--space-sm);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    margin-top: var(--space-sm);
+}
+
+.strategy-selector__option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background 0.15s ease;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.strategy-selector__option:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.strategy-selector__option--active {
+    background: var(--accent-blue-dim);
+    color: var(--accent-cyan);
+}
+
+.strategy-selector__icon {
+    font-size: 0.85rem;
+    width: 18px;
+    text-align: center;
+}
+
+.strategy-selector__label {
+    font-weight: 600;
+}
+
+.strategy-selector__desc {
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    margin-top: 1px;
+}
+
+/* Subtree budget alert */
+.subtree-alert {
+    background: var(--accent-red-dim);
+    border: 1px solid rgba(241, 76, 76, 0.2);
+    border-radius: var(--radius-sm);
+    padding: var(--space-sm) var(--space-md);
+    font-size: 0.72rem;
+    color: var(--accent-red);
+    margin-top: var(--space-xs);
+}
+
+/* Budget node color-coding for cluster map */
+.cluster-node-circle.budget--green {
+    filter: drop-shadow(0 0 4px rgba(78, 201, 176, 0.3));
+}
+
+.cluster-node-circle.budget--amber {
+    filter: drop-shadow(0 0 4px rgba(204, 167, 0, 0.4));
+}
+
+.cluster-node-circle.budget--red {
+    filter: drop-shadow(0 0 6px rgba(241, 76, 76, 0.5));
+}
+

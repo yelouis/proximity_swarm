@@ -911,6 +911,25 @@ class AgentRunner:
                         user_prompt += pruned_context_str + "\n"
                     if getattr(self, "historical_context", None):
                         user_prompt += self.historical_context + "\n\n"
+
+                    # Inject chat directives from human operator
+                    chat_messages = self.state.get("chat_messages", [])
+                    unprocessed = [m for m in chat_messages if not m.get("processed", False)]
+                    if unprocessed:
+                        user_prompt += "=== HUMAN OPERATOR DIRECTIVES ===\n"
+                        user_prompt += "The human operator has sent you the following messages. Follow these directives carefully:\n\n"
+                        for msg in unprocessed:
+                            user_prompt += f"- {msg.get('content', '')}\n"
+                        user_prompt += "\nPlease incorporate these directives into your current work.\n"
+                        user_prompt += "=== END OPERATOR DIRECTIVES ===\n\n"
+                        # Mark messages as processed
+                        for msg in chat_messages:
+                            if not msg.get("processed", False):
+                                msg["processed"] = True
+                        self.state["chat_messages"] = chat_messages
+                        save_json(CURRENT_AGENT_STATE_FILE, self.state)
+                        print(f"  [Chat] Injected {len(unprocessed)} operator directive(s) into prompt.")
+
                     user_prompt += (
                         f"Current Step: {current_step['name']}\n"
                         f"Description: {current_step['description']}\n"

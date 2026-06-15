@@ -630,13 +630,57 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                     pass
                     
             # Check if any active leaf agent's accumulated output tokens exceed the budget cap
+            # Supports per-node (token_budget) and subtree (subtree_token_budget) limits
             leafs = get_active_leaf_agents(active_agents)
             budget_exceeded = False
             max_leaf_tokens = 0
+            per_agent_status = []
+
+            # Build parent->children map for subtree calculations
+            agent_map = {a.get("id"): a for a in agents}
+            children_map = {}
+            for a in agents:
+                pid = a.get("parent_id")
+                if pid:
+                    children_map.setdefault(pid, []).append(a)
+
+            def get_subtree_tokens(agent_id):
+                """Recursively sum output_tokens for an agent and all descendants."""
+                total = agent_map.get(agent_id, {}).get("output_tokens", 0)
+                for child in children_map.get(agent_id, []):
+                    total += get_subtree_tokens(child.get("id"))
+                return total
+
             for leaf in leafs:
-                max_leaf_tokens = max(max_leaf_tokens, leaf.get("output_tokens", 0))
-                if leaf.get("output_tokens", 0) > current_budget:
+                leaf_tokens = leaf.get("output_tokens", 0)
+                max_leaf_tokens = max(max_leaf_tokens, leaf_tokens)
+
+                # Per-node budget check (falls back to global budget)
+                node_budget = leaf.get("token_budget", current_budget)
+                if leaf_tokens > node_budget:
                     budget_exceeded = True
+
+                per_agent_status.append({
+                    "id": leaf.get("id"),
+                    "output_tokens": leaf_tokens,
+                    "token_budget": node_budget,
+                    "pct": round((leaf_tokens / max(node_budget, 1)) * 100, 1),
+                })
+
+            # Subtree budget checks for parent agents
+            subtree_alerts = []
+            for a in active_agents:
+                stb = a.get("subtree_token_budget")
+                if stb is not None and stb > 0:
+                    subtree_used = get_subtree_tokens(a.get("id"))
+                    if subtree_used > stb:
+                        budget_exceeded = True
+                        subtree_alerts.append({
+                            "parent_id": a.get("id"),
+                            "subtree_used": subtree_used,
+                            "subtree_budget": stb,
+                            "pct": round((subtree_used / max(stb, 1)) * 100, 1),
+                        })
                     
             if budget_exceeded:
                 ranked = rank_leaf_agents_llm(leafs, macro_goal, OLLAMA_MODEL)
@@ -644,18 +688,25 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                     "budget_exceeded": True,
                     "active_count": max_leaf_tokens,  # Holds max leaf output tokens for display
                     "budget_limit": current_budget,
-                    "candidates": ranked
+                    "candidates": ranked,
+                    "per_agent_status": per_agent_status,
+                    "subtree_alerts": subtree_alerts,
                 }
                 alert_file = os.path.join(STATE_DIR, "budget_alert.json")
                 with open(alert_file, 'w') as f_alert:
                     json.dump(alert_data, f_alert, indent=2)
             else:
+                # Even when not exceeded, write per-agent status for UI display
+                alert_data = {
+                    "budget_exceeded": False,
+                    "active_count": max_leaf_tokens,
+                    "budget_limit": current_budget,
+                    "per_agent_status": per_agent_status,
+                    "subtree_alerts": subtree_alerts,
+                }
                 alert_file = os.path.join(STATE_DIR, "budget_alert.json")
-                if os.path.exists(alert_file):
-                    try:
-                        os.remove(alert_file)
-                    except Exception:
-                        pass
+                with open(alert_file, 'w') as f_alert:
+                    json.dump(alert_data, f_alert, indent=2)
             
             # Build corpus of goals/steps for TF-IDF
             corpus = []
