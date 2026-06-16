@@ -443,6 +443,16 @@ function renderViewportContent() {
         tab.classList.toggle('viewport__tab--active', tab.dataset.tab === UIState.activeTab);
     });
 
+    // Dynamically update agent chat tab text to show current agent identifier
+    const chatTab = document.getElementById('agent-chat-tab');
+    if (chatTab) {
+        if (UIState.editingAgentId) {
+            chatTab.textContent = `Agent Chat (${UIState.editingAgentId})`;
+        } else {
+            chatTab.textContent = 'Agent Chat';
+        }
+    }
+
     const container = document.getElementById('viewport-content');
 
     switch (UIState.activeTab) {
@@ -464,6 +474,339 @@ function renderViewportContent() {
         case 'logs':
             renderLogsTab(container);
             break;
+        case 'agent-chat':
+            renderAgentChatTab(container);
+            break;
+    }
+}
+
+function renderAgentChatTab(container) {
+    const agentId = UIState.editingAgentId;
+    const agent = SwarmState.agents.find(a => a.id === agentId);
+    if (!agent) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state__icon">🤖</div>
+                <div class="empty-state__title">No Agent Selected</div>
+                <div class="empty-state__desc">Select an agent from the sidebar list or cluster map to view details.</div>
+            </div>
+        `;
+        return;
+    }
+
+    const steps = agent.steps || [];
+    let stepsHtml = '';
+    if (steps.length > 0) {
+        stepsHtml = `
+            <div class="workspace-section">
+                <div class="workspace-section__title">📌 Task Steps</div>
+                <div class="workspace-steps-list">
+        `;
+        const currentStepNum = getStepNumber(agent);
+        for (const step of steps) {
+            const stepStatusClass = currentStepNum > step.step_id ? 'step--completed' :
+                                    currentStepNum === step.step_id ? 'step--active' : 'step--pending';
+            const stepIcon = currentStepNum > step.step_id ? '✅' :
+                             currentStepNum === step.step_id ? '🔄' : '⏳';
+            stepsHtml += `
+                <div class="workspace-step ${stepStatusClass}">
+                    <div class="workspace-step__header">
+                        <span class="workspace-step__icon">${stepIcon}</span>
+                        <span class="workspace-step__name">Step ${step.step_id}: ${escapeHtml(step.name || '')}</span>
+                    </div>
+                    <div class="workspace-step__desc">${escapeHtml(step.description || '')}</div>
+                </div>
+            `;
+        }
+        stepsHtml += '</div></div>';
+    }
+
+    // Budget section
+    const nodeBudget = agent.token_budget || SwarmState.session_budget || 20000;
+    const subtreeBudget = agent.subtree_token_budget || null;
+    const usedTokens = agent.output_tokens || 0;
+    const budgetPctNode = Math.min(Math.round((usedTokens / Math.max(nodeBudget, 1)) * 100), 100);
+    const budgetColorNode = budgetPctNode > 90 ? 'red' : budgetPctNode > 60 ? 'amber' : 'green';
+
+    const allAgents = SwarmState.agents;
+    const hasChildren = allAgents.some(a => a.parent_id === agentId && !['completed', 'dead'].includes(a.status));
+
+    let budgetHtml = `
+        <div class="workspace-section">
+            <div class="workspace-section__title">🪙 Token Budget Cap</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm); margin-bottom: var(--space-sm);">
+                <div>
+                    <label class="form-label" style="font-size: 0.65rem;">Node Budget</label>
+                    <input type="number" class="form-input form-input--compact" id="workspace-node-budget" value="${nodeBudget}" min="100" step="100">
+                </div>
+                <div>
+                    <label class="form-label" style="font-size: 0.65rem;">Subtree Budget</label>
+                    <input type="number" class="form-input form-input--compact" id="workspace-subtree-budget" value="${subtreeBudget || ''}" placeholder="Inherit global" min="100" step="100">
+                </div>
+            </div>
+            <div class="budget-tree__bar" style="height: 6px; border-radius: 3px; background: var(--bg-tertiary); overflow: hidden;">
+                <div class="budget-tree__bar-fill budget-tree__bar-fill--${budgetColorNode}" style="width: ${budgetPctNode}%"></div>
+            </div>
+            <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: var(--space-xs); display: flex; justify-content: space-between;">
+                <span>Used: ${usedTokens.toLocaleString()} / ${nodeBudget.toLocaleString()}</span>
+                <span>${budgetPctNode}%</span>
+            </div>
+    `;
+
+    if (hasChildren) {
+        budgetHtml += `
+            <div style="margin-top: var(--space-md); border-top: 1px solid var(--border-secondary); padding-top: var(--space-sm);">
+                <div style="font-size: 0.68rem; font-weight: 600; color: var(--text-secondary); margin-bottom: var(--space-xs);">Redistribute Budget</div>
+                <div style="display: flex; gap: var(--space-xs);">
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="equal" title="Split equally among children">⚖️ Equal</button>
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="weighted" title="Proportional to progress">📊 Weighted</button>
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="priority" title="Based on priority weights">🎯 Priority</button>
+                </div>
+            </div>
+        `;
+    }
+    budgetHtml += `</div>`;
+
+    // Combine and sort chat messages + thought traces
+    const chatMessages = agent.chat_messages || [];
+    const thoughts = agent.thought_traces || [];
+
+    const timelineItems = [];
+    for (const msg of chatMessages) {
+        timelineItems.push({
+            type: 'chat',
+            timestamp: msg.timestamp,
+            data: msg
+        });
+    }
+    for (const th of thoughts) {
+        timelineItems.push({
+            type: 'thought',
+            timestamp: th.timestamp,
+            data: th
+        });
+    }
+
+    timelineItems.sort((a, b) => a.timestamp - b.timestamp);
+
+    let chatTimelineHtml = '';
+    if (timelineItems.length === 0) {
+        chatTimelineHtml = `
+            <div class="chat-panel__empty" style="flex: 1; display: flex; flex-direction: column; justify-content: center; min-height: 200px;">
+                <div style="font-size: 1.5rem;">💬</div>
+                <div style="margin-top: var(--space-sm);">No messages or thoughts logged yet.</div>
+                <div style="font-size: 0.72rem; color: var(--text-muted); max-width: 250px; margin: 4px auto 0;">Send a message to direct the agent or run the swarm to see thoughts in real time.</div>
+            </div>
+        `;
+    } else {
+        chatTimelineHtml = '<div class="agent-chat-timeline" id="agent-chat-timeline-scroll">';
+        for (const item of timelineItems) {
+            if (item.type === 'chat') {
+                const msg = item.data;
+                const timeStr = new Date(msg.timestamp * 1000).toLocaleTimeString();
+                const isUser = msg.role === 'user';
+                const roleClass = isUser ? 'chat-message--user' : 'chat-message--system';
+                chatTimelineHtml += `
+                    <div class="chat-message ${roleClass}" style="max-width: 80%; margin-bottom: var(--space-sm);">
+                        <div class="chat-message__bubble" style="padding: var(--space-sm) var(--space-md); border-radius: var(--radius-md); font-size: 0.8rem;">${escapeHtml(msg.content)}</div>
+                        <div class="chat-message__meta">
+                            <span>${isUser ? 'You' : 'Agent'}</span>
+                            <span>·</span>
+                            <span>${timeStr}</span>
+                            ${!msg.processed && isUser ? '<span class="chat-message__pending">pending</span>' : ''}
+                            ${msg.processed && isUser ? '<span style="color: var(--accent-green);">✓ delivered</span>' : ''}
+                        </div>
+                    </div>
+                `;
+            } else {
+                const th = item.data;
+                const timeStr = new Date(th.timestamp * 1000).toLocaleTimeString();
+                const iconMap = {
+                    evaluating: '🔍',
+                    decision: '🎯',
+                    executing: '🔄',
+                    completed: '✅',
+                    failed: '❌',
+                    spawn: '🚀',
+                    syncing: '⚡',
+                    resolved: '🤝'
+                };
+                const icon = iconMap[th.type] || '💭';
+                chatTimelineHtml += `
+                    <div class="thought-trace thought-trace--${th.type}">
+                        <div class="thought-trace__icon">${icon}</div>
+                        <div class="thought-trace__body">
+                            <div class="thought-trace__content">${escapeHtml(th.content)}</div>
+                            <div class="thought-trace__time">${timeStr}</div>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+        chatTimelineHtml += '</div>';
+    }
+
+    container.innerHTML = `
+        <div class="agent-chat-layout">
+            <!-- Left Pane: LLM Chat Interface -->
+            <div class="agent-chat-left">
+                <div class="agent-chat-header">
+                    <span style="font-size: 1rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+                        👤 Agent ${agentId} <span style="font-size:0.75rem; font-weight:normal; color:var(--text-muted);">(${escapeHtml(agent.personality || agent.role || 'Generalist')})</span>
+                    </span>
+                    <button class="btn btn--sm btn--ghost" data-action="close-edit" style="font-size: 0.75rem;">✕ Close Workspace</button>
+                </div>
+                
+                <div class="agent-chat-body" style="flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-secondary); border-radius: var(--radius-md); padding: var(--space-md); border: 1px solid var(--border-primary);">
+                    ${chatTimelineHtml}
+                    
+                    <div class="agent-chat-input-row" style="display: flex; gap: var(--space-sm); margin-top: var(--space-md); padding-top: var(--space-sm); border-top: 1px solid var(--border-primary);">
+                        <input type="text" class="form-input" id="agent-workspace-chat-input" placeholder="Send message/directive to Agent ${agentId}..." style="flex: 1;" autocomplete="off">
+                        <button class="btn btn--primary" id="agent-workspace-chat-send-btn" data-agent-id="${agentId}">Send</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Right Pane: Workspace Details & Settings -->
+            <div class="agent-chat-right">
+                <div class="workspace-section" style="margin-top: 0;">
+                    <div class="workspace-section__title">⚙️ Agent Settings</div>
+                    <div class="form-group">
+                        <label class="form-label">Role / Personality</label>
+                        <input type="text" class="form-input form-input--compact" id="workspace-agent-role" value="${escapeAttr(agent.personality || agent.role || 'Generalist')}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Goal / Subtask</label>
+                        <textarea class="form-textarea" id="workspace-agent-goal" rows="3" style="font-size: 0.78rem;">${escapeHtml(agent.goal || '')}</textarea>
+                    </div>
+                    <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0;">
+                        <span style="font-size:0.75rem; color:var(--text-secondary);">Status: <strong style="color: ${{
+                            exploring: 'var(--accent-cyan)',
+                            completed: 'var(--accent-green)',
+                            dead: 'var(--accent-red)',
+                            syncing: 'var(--accent-amber)',
+                            pending_termination: 'var(--accent-red)',
+                        }[agent.status] || 'var(--text-primary)'};">${statusLabel(agent.status)}</strong></span>
+                        <button class="btn btn--ghost btn--sm" id="workspace-agent-save-btn" data-agent-id="${agentId}">💾 Save Changes</button>
+                    </div>
+                </div>
+
+                ${budgetHtml}
+
+                <div class="workspace-section">
+                    <div class="workspace-section__title">📈 Completion Progress</div>
+                    <div class="progress-bar" style="height: 8px; border-radius: 4px;"><div class="progress-bar__fill" style="width: ${computeProgress(agent)}%"></div></div>
+                    <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: var(--space-xs); display:flex; justify-content:space-between;">
+                        <span>Step ${getStepNumber(agent)}/${steps.length || '?'}</span>
+                        <span>${computeProgress(agent)}%</span>
+                    </div>
+                    <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">
+                        Output Tokens: <strong>${(agent.output_tokens || 0).toLocaleString()}</strong>
+                    </div>
+                </div>
+
+                ${stepsHtml}
+
+                <div class="workspace-section">
+                    <div class="workspace-section__title">📁 Touched Files</div>
+                    <div class="workspace-touched-files-list">
+                        ${(agent.touched_files || []).map(f => `
+                            <div class="workspace-file-item" data-action="view-workspace" data-agent-id="${agentId}" style="cursor: pointer; padding: 4px 6px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent-cyan);">
+                                📄 ${escapeHtml(f)}
+                            </div>
+                        `).join('') || '<div style="font-size:0.72rem; color: var(--text-muted); font-style:italic;">No files touched yet</div>'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Auto-scroll timeline to bottom
+    const scrollContainer = document.getElementById('agent-chat-timeline-scroll');
+    if (scrollContainer) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    }
+
+    // Attach listeners inside this tab
+    const chatInput = document.getElementById('agent-workspace-chat-input');
+    if (chatInput) {
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendWorkspaceChatMessage(agentId);
+            }
+        });
+    }
+
+    const sendBtn = document.getElementById('agent-workspace-chat-send-btn');
+    if (sendBtn) {
+        sendBtn.onclick = () => sendWorkspaceChatMessage(agentId);
+    }
+
+    const saveBtn = document.getElementById('workspace-agent-save-btn');
+    if (saveBtn) {
+        saveBtn.onclick = () => saveWorkspaceAgentEdits(agentId);
+    }
+}
+
+async function sendWorkspaceChatMessage(agentId) {
+    const input = document.getElementById('agent-workspace-chat-input');
+    if (!input) return;
+    const message = input.value.trim();
+    if (!message) return;
+
+    input.value = '';
+
+    const result = await apiPost(`/api/agents/${agentId}/chat`, { message });
+    if (result.success) {
+        showToast(`Message sent to Agent ${agentId}`, 'success');
+        const agent = SwarmState.agents.find(a => a.id === agentId);
+        if (agent) {
+            if (!agent.chat_messages) agent.chat_messages = [];
+            agent.chat_messages.push({
+                role: 'user',
+                content: message,
+                timestamp: Date.now() / 1000,
+                processed: false
+            });
+            render();
+        }
+    } else {
+        showToast(result.message || 'Failed to send message', 'error');
+    }
+}
+
+async function saveWorkspaceAgentEdits(agentId) {
+    const role = document.getElementById('workspace-agent-role').value;
+    const goal = document.getElementById('workspace-agent-goal').value;
+    const nodeBudgetInput = document.getElementById('workspace-node-budget');
+    const subtreeBudgetInput = document.getElementById('workspace-subtree-budget');
+
+    const updates = {
+        personality: role,
+        goal: goal
+    };
+
+    if (nodeBudgetInput && nodeBudgetInput.value) {
+        updates.token_budget = parseInt(nodeBudgetInput.value);
+    }
+    if (subtreeBudgetInput && subtreeBudgetInput.value) {
+        updates.subtree_token_budget = parseInt(subtreeBudgetInput.value);
+    }
+
+    const result = await apiPost(`/api/agents/${agentId}/edit`, updates);
+    if (result.success) {
+        showToast(`Agent ${agentId} updated`, 'success');
+        const agent = SwarmState.agents.find(a => a.id === agentId);
+        if (agent) {
+            agent.personality = role;
+            agent.goal = goal;
+            if (updates.token_budget) agent.token_budget = updates.token_budget;
+            if (updates.subtree_token_budget) agent.subtree_token_budget = updates.subtree_token_budget;
+            render();
+        }
+    } else {
+        showToast(result.message || 'Failed to update agent', 'error');
     }
 }
 
@@ -1226,180 +1569,26 @@ function openEditPanel(agentId) {
     if (!agent) return;
 
     UIState.editingAgentId = agentId;
-    const panel = document.getElementById('agent-edit-panel');
-    const backdrop = document.getElementById('slide-backdrop');
-    const title = document.getElementById('edit-panel-title');
-    const body = document.getElementById('edit-panel-body');
+    UIState.activeTab = 'agent-chat';
 
-    title.textContent = `Agent ${agentId}`;
-
-    const steps = agent.steps || [];
-    let stepsHtml = '';
-    if (steps.length > 0) {
-        stepsHtml = '<div class="form-group"><label class="form-label">Task Steps</label><div style="display: flex; flex-direction: column; gap: var(--space-sm);">';
-        const currentStepNum = getStepNumber(agent);
-        for (const step of steps) {
-            const stepStatus = currentStepNum > step.step_id ? '✅' :
-                               currentStepNum === step.step_id ? '🔄' : '⏳';
-            stepsHtml += `
-                <div style="background: var(--bg-primary); padding: var(--space-md); border-radius: var(--radius-sm); border: 1px solid var(--border-primary);">
-                    <div style="font-size: 0.75rem; color: var(--text-secondary);">${stepStatus} Step ${step.step_id}: <strong>${escapeHtml(step.name || '')}</strong></div>
-                    <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;">${escapeHtml(step.description || '')}</div>
-                </div>
-            `;
-        }
-        stepsHtml += '</div></div>';
+    const tabEl = document.getElementById('agent-chat-tab');
+    if (tabEl) {
+        tabEl.style.display = 'flex';
     }
 
-    // Budget section
-    const nodeBudget = agent.token_budget || SwarmState.session_budget || 20000;
-    const subtreeBudget = agent.subtree_token_budget || null;
-    const usedTokens = agent.output_tokens || 0;
-    const budgetPctNode = Math.min(Math.round((usedTokens / Math.max(nodeBudget, 1)) * 100), 100);
-    const budgetColorNode = budgetPctNode > 90 ? 'red' : budgetPctNode > 60 ? 'amber' : 'green';
-
-    // Check if this agent has children
-    const allAgents = SwarmState.agents;
-    const hasChildren = allAgents.some(a => a.parent_id === agentId && !['completed', 'dead'].includes(a.status));
-
-    let budgetHtml = `
-        <div class="form-group">
-            <label class="form-label">Token Budget</label>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm);">
-                <div>
-                    <div style="font-size: 0.68rem; color: var(--text-muted); margin-bottom: 2px;">Node Budget</div>
-                    <input type="number" class="form-input" id="edit-node-budget" value="${nodeBudget}" min="100" step="100"
-                           style="font-family: var(--font-mono); font-size: 0.8rem;">
-                </div>
-                <div>
-                    <div style="font-size: 0.68rem; color: var(--text-muted); margin-bottom: 2px;">Subtree Budget</div>
-                    <input type="number" class="form-input" id="edit-subtree-budget" value="${subtreeBudget || ''}" min="100" step="100"
-                           placeholder="Inherit global" style="font-family: var(--font-mono); font-size: 0.8rem;">
-                </div>
-            </div>
-            <div style="margin-top: var(--space-sm);">
-                <div class="budget-tree__bar" style="height: 4px;">
-                    <div class="budget-tree__bar-fill budget-tree__bar-fill--${budgetColorNode}" style="width: ${budgetPctNode}%"></div>
-                </div>
-                <div style="font-size: 0.68rem; color: var(--text-muted); margin-top: 2px;">
-                    Used: ${usedTokens.toLocaleString()} / ${nodeBudget.toLocaleString()} (${budgetPctNode}%)
-                </div>
-            </div>
-    `;
-
-    if (hasChildren) {
-        budgetHtml += `
-            <div style="margin-top: var(--space-md); border-top: 1px solid var(--border-secondary); padding-top: var(--space-sm);">
-                <div style="font-size: 0.68rem; font-weight: 600; color: var(--text-secondary); margin-bottom: var(--space-xs);">Redistribute Among Children</div>
-                <div style="display: flex; gap: var(--space-xs); flex-wrap: wrap;">
-                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="equal" title="Split equally among children">⚖️ Equal</button>
-                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="weighted" title="Proportional to progress">📊 Weighted</button>
-                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agentId}" data-strategy="priority" title="Based on priority weights">🎯 Priority</button>
-                </div>
-            </div>
-        `;
-    }
-
-    budgetHtml += `</div>`;
-
-    // Chat messages
-    const chatMessages = agent.chat_messages || [];
-    let chatHtml = `
-        <div class="chat-panel">
-            <div class="chat-panel__title">
-                <span class="chat-panel__title-icon">💬</span>
-                Operator Chat
-                ${chatMessages.filter(m => !m.processed).length > 0 ? `<span class="chat-message__pending">${chatMessages.filter(m => !m.processed).length} pending</span>` : ''}
-            </div>
-            <div class="chat-panel__messages" id="chat-messages-list">
-    `;
-    if (chatMessages.length === 0) {
-        chatHtml += `<div class="chat-panel__empty">No messages yet. Send a directive to guide this agent.</div>`;
-    } else {
-        for (const msg of chatMessages) {
-            const time = new Date(msg.timestamp * 1000).toLocaleTimeString();
-            const roleClass = msg.role === 'user' ? 'chat-message--user' : 'chat-message--system';
-            chatHtml += `
-                <div class="chat-message ${roleClass}">
-                    <div class="chat-message__bubble">${escapeHtml(msg.content)}</div>
-                    <div class="chat-message__meta">
-                        <span>${msg.role === 'user' ? 'You' : 'Agent'}</span>
-                        <span>·</span>
-                        <span>${time}</span>
-                        ${!msg.processed && msg.role === 'user' ? '<span class="chat-message__pending">pending</span>' : ''}
-                        ${msg.processed && msg.role === 'user' ? '<span style="color: var(--accent-green);">✓ delivered</span>' : ''}
-                    </div>
-                </div>
-            `;
-        }
-    }
-    chatHtml += `
-            </div>
-            <div class="chat-input-bar">
-                <input type="text" class="chat-input-bar__input" id="chat-input" placeholder="Send directive to Agent ${agentId}..." autocomplete="off">
-                <button class="chat-input-bar__send" data-action="send-chat" data-agent-id="${agentId}">Send</button>
-            </div>
-        </div>
-    `;
-
-    body.innerHTML = `
-        <div class="form-group">
-            <label class="form-label">Status</label>
-            <div style="font-size: 0.85rem; font-weight: 600; color: ${{
-                exploring: 'var(--accent-cyan)',
-                completed: 'var(--accent-green)',
-                dead: 'var(--accent-red)',
-                syncing: 'var(--accent-amber)',
-                pending_termination: 'var(--accent-red)',
-            }[agent.status] || 'var(--text-primary)'};">${statusLabel(agent.status)}</div>
-        </div>
-        <div class="form-group">
-            <label class="form-label" for="edit-role">Role / Personality</label>
-            <input type="text" class="form-input" id="edit-role" value="${escapeAttr(agent.personality || agent.role || 'Generalist')}">
-        </div>
-        <div class="form-group">
-            <label class="form-label" for="edit-goal">Goal</label>
-            <textarea class="form-textarea" id="edit-goal" rows="4">${escapeHtml(agent.goal || '')}</textarea>
-        </div>
-        ${budgetHtml}
-        <div class="form-group">
-            <label class="form-label">Progress</label>
-            <div class="progress-bar" style="height: 8px;"><div class="progress-bar__fill" style="width: ${computeProgress(agent)}%"></div></div>
-            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: var(--space-xs);">Step ${getStepNumber(agent)}/${steps.length || '?'} · Output tokens: ${(agent.output_tokens || 0).toLocaleString()}</div>
-        </div>
-        ${stepsHtml}
-        <div class="form-group">
-            <label class="form-label">Touched Files</label>
-            <div style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary);">
-                ${(agent.touched_files || []).map(f => `<div>📄 ${escapeHtml(f)}</div>`).join('') || '<div style="color: var(--text-muted);">No files yet</div>'}
-            </div>
-        </div>
-        ${chatHtml}
-    `;
-
-    panel.classList.add('slide-panel--active');
-    backdrop.classList.add('modal-overlay--active');
-
-    // Auto-scroll chat to bottom
-    const chatList = document.getElementById('chat-messages-list');
-    if (chatList) chatList.scrollTop = chatList.scrollHeight;
-
-    // Wire chat input Enter key
-    const chatInput = document.getElementById('chat-input');
-    if (chatInput) {
-        chatInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendChatMessage(agentId);
-            }
-        });
-    }
+    render();
 }
 
 function closeEditPanel() {
     UIState.editingAgentId = null;
-    document.getElementById('agent-edit-panel').classList.remove('slide-panel--active');
-    document.getElementById('slide-backdrop').classList.remove('modal-overlay--active');
+    const tabEl = document.getElementById('agent-chat-tab');
+    if (tabEl) {
+        tabEl.style.display = 'none';
+    }
+    if (UIState.activeTab === 'agent-chat') {
+        UIState.activeTab = 'overview';
+    }
+    render();
 }
 
 async function sendChatMessage(agentId) {

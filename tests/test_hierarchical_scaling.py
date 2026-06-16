@@ -231,14 +231,32 @@ class TestHierarchicalScaling(unittest.TestCase):
         with open(agent_002_file, 'w') as f:
             json.dump(agent_002_state, f)
             
-        # Mock load_json sequence inside perform_negotiation
-        mock_load.side_effect = lambda path: (
-            mock_load.return_value if "agent_001.json" in path else (
-                agent_002_state if "agent_002.json" in path else (
-                    collision_data if f"collision_{collision_id}.json" in path else {}
-                )
-            )
-        )
+        # Stateful mock database
+        db = {}
+        def mock_load_fn(path):
+            for k, v in db.items():
+                if k in path or path in k:
+                    return v
+            if "agent_001.json" in path:
+                return mock_load.return_value
+            if "agent_002.json" in path:
+                return agent_002_state
+            if f"collision_{collision_id}.json" in path:
+                return collision_data
+            return {}
+
+        def mock_save_fn(path, data):
+            found = False
+            for k in list(db.keys()):
+                if k in path or path in k:
+                    db[k] = data
+                    found = True
+                    break
+            if not found:
+                db[path] = data
+
+        mock_load.side_effect = mock_load_fn
+        mock_save.side_effect = mock_save_fn
         
         # Override class workspace paths for testing
         runner.workspace_dir = self.test_dir

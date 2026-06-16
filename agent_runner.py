@@ -368,6 +368,22 @@ class AgentRunner:
         self.historical_context = None
         self.load_historical_context()
 
+    def add_thought_trace(self, content, thought_type="info", details=None):
+        disk_state = load_json(self.state_file)
+        if disk_state:
+            for key in ["chat_messages", "spawn_request", "goal", "personality", "output_token_budget", "subtree_token_budget"]:
+                if key in disk_state:
+                    self.state[key] = disk_state[key]
+        if "thought_traces" not in self.state:
+            self.state["thought_traces"] = []
+        self.state["thought_traces"].append({
+            "timestamp": time.time(),
+            "content": content,
+            "type": thought_type,
+            "details": details or {}
+        })
+        save_json(self.state_file, self.state)
+
     def apply_offset_to_files(self, files):
         result = []
         for f in files:
@@ -449,7 +465,11 @@ class AgentRunner:
 
     def request_spawn_agent(self, goal, initial_files, reason=None):
         """Writes a spawn_request block to the agent's state file for supervisor monitoring."""
-        self.state = load_json(self.state_file) or self.state
+        disk_state = load_json(self.state_file)
+        if disk_state:
+            for key in ["chat_messages", "spawn_request", "goal", "personality", "output_token_budget", "subtree_token_budget"]:
+                if key in disk_state:
+                    self.state[key] = disk_state[key]
         self.state["spawn_request"] = {
             "goal": goal,
             "initial_files": list(initial_files),
@@ -457,6 +477,11 @@ class AgentRunner:
             "reason": reason or "Accelerate step execution and parallelize sub-task work."
         }
         save_json(self.state_file, self.state)
+        self.add_thought_trace(
+            f"Supervisor spawn request generated: spawn sub-agent for goal '{goal}'. Reason: {reason or 'none'}",
+            "spawn",
+            {"goal": goal, "initial_files": list(initial_files), "reason": reason}
+        )
         print(f"  [Spawn Request] Registered request to spawn child agent with goal: '{goal}'")
         return json.dumps({
             "status": "success",
@@ -766,6 +791,80 @@ class AgentRunner:
             self.perform_negotiation()
             return
 
+        # 1. Process pending operator chat messages (Pivot / Add Context Decision Loop)
+        chat_messages = self.state.get("chat_messages", [])
+        unprocessed = [m for m in chat_messages if not m.get("processed", False) and m.get("role") == "user"]
+        if unprocessed:
+            self.add_thought_trace(
+                f"New operator message received. Evaluating implications on current goal...",
+                "evaluating"
+            )
+            msg_content = "\n".join([f"- {msg['content']}" for msg in unprocessed])
+            prompt = (
+                f"You are Agent {self.agent_id} (Role: {self.state.get('personality', 'Generalist')}) currently working with goal: '{self.state.get('goal', '')}'.\n"
+                f"You received the following message(s) from the human operator:\n"
+                f"{msg_content}\n\n"
+                f"You must decide how to handle this input. Choose between:\n"
+                f"1. ADD_CONTEXT: Keep your current goal but incorporate this message as additional context for your work.\n"
+                f"2. PIVOT: Change/update your goal/direction in response to the operator's instructions.\n\n"
+                f"Respond strictly in JSON format with keys:\n"
+                f"- 'decision': must be either 'ADD_CONTEXT' or 'PIVOT'\n"
+                f"- 'thought': 2-3 sentences explaining your reasoning (why you chose this action and how it affects your task)\n"
+                f"- 'updated_goal': if you chose 'PIVOT', write the new/modified goal description. If 'ADD_CONTEXT', keep it the same as the current goal.\n"
+            )
+            
+            provider = self.llm_provider
+            if not provider:
+                if os.environ.get("GEMINI_API_KEY"):
+                    provider = "gemini"
+                elif is_ollama_running():
+                    provider = "ollama"
+                else:
+                    provider = "rules"
+                    
+            res = None
+            try:
+                if provider == "gemini":
+                    res = call_gemini_api(prompt)
+                elif provider == "ollama":
+                    res = call_ollama_api(prompt, model=self.ollama_model)
+            except Exception as ex:
+                print(f"[Chat Decision LLM Error]: {ex}")
+                
+            if not res:
+                res = {
+                    "decision": "ADD_CONTEXT",
+                    "thought": "LLM offline or error. Defaulting to adding message as context.",
+                    "updated_goal": self.state.get("goal")
+                }
+            
+            decision = res.get("decision", "ADD_CONTEXT")
+            thought = res.get("thought", "Incorporating user message.")
+            updated_goal = res.get("updated_goal", self.state.get("goal"))
+            
+            self.add_thought_trace(
+                f"Operator message decision: {decision}. Reasoning: {thought}" + (f" (New Goal: '{updated_goal}')" if decision == "PIVOT" else ""),
+                "decision",
+                {"decision": decision, "thought": thought, "updated_goal": updated_goal}
+            )
+            
+            if decision == "PIVOT":
+                self.state["goal"] = updated_goal
+                print(f"  [Chat Pivot] Agent {self.agent_id} goal updated to: '{updated_goal}'")
+            
+            chat_messages.append({
+                "role": "assistant",
+                "content": f"Decision: {decision}\nReasoning: {thought}" + (f"\nNew Goal: {updated_goal}" if decision == "PIVOT" else ""),
+                "timestamp": time.time(),
+                "processed": True
+            })
+            
+            # Note: We do NOT mark the operator user messages as processed here.
+            # They will remain unprocessed so that the step execution file prompt generator
+            # sees them and incorporates them as OPERATOR DIRECTIVES, and then marks them processed.
+            self.state["chat_messages"] = chat_messages
+            save_json(self.state_file, self.state)
+
         # Start-of-step state save to ensure coordinates (status, progress, current_step, files, tools) are synced
         save_json(self.state_file, self.state)
         
@@ -811,6 +910,12 @@ class AgentRunner:
         step_files = self.apply_offset_to_files(current_step.get("touched_files", []))
         step_tools = current_step.get("tools", [])
         
+        self.add_thought_trace(
+            f"Starting Step {current_step['step_id']}: '{current_step['name']}' (Goal: '{self.state['goal']}'). Target files: {', '.join(step_files) if step_files else 'None'}",
+            "executing",
+            {"step_id": current_step['step_id'], "step_name": current_step['name']}
+        )
+        
         tombstone = self.check_tombstones(step_files, step_tools)
         applied_workaround = False
         
@@ -832,6 +937,11 @@ class AgentRunner:
                     "error_message": tombstone.get("error_message", "unknown"),
                     "fix_action": tombstone.get("fix_action", "unknown")
                 }
+                self.add_thought_trace(
+                    f"Hit absolute blockade: {tombstone['error_message']}. Proposing pending termination.",
+                    "failed",
+                    {"error": tombstone['error_message']}
+                )
                 save_json(self.state_file, self.state)
                 self.save_memory_episode(status="failed", error_message=tombstone['error_message'])
                 try:
@@ -994,6 +1104,11 @@ class AgentRunner:
             }
             tombstones.append(new_tombstone)
             save_json(TOMBSTONES_FILE, tombstones)
+            self.add_thought_trace(
+                f"Step execution CRASHED: {error_msg}. Tombstone registered.",
+                "failed",
+                {"error": error_msg}
+            )
             print(f"  [TOMBSTONE REGISTERED] Saved failure context to tombstones.json.")
             
             self.state["status"] = "pending_termination"
@@ -1025,6 +1140,12 @@ class AgentRunner:
         
         self.state["steps_completed"] += 1
         self.state["progress"] = int((self.state["steps_completed"] / len(steps)) * 100)
+        
+        self.add_thought_trace(
+            f"Step '{current_step['name']}' completed successfully (Progress: {self.state['progress']}%). Touched files: {', '.join(step_files) if step_files else 'None'}",
+            "completed",
+            {"step_id": current_step['step_id'], "step_name": current_step['name']}
+        )
         
         for f in step_files:
             if f not in self.state["touched_files"]:
@@ -1102,6 +1223,12 @@ class AgentRunner:
         peer_id = agent_b["id"] if agent_a["id"] == self.agent_id else agent_a["id"]
         peer_state_file = os.path.join(AGENTS_DIR, f"agent_{peer_id}.json")
         peer_state = load_json(peer_state_file)
+        
+        self.add_thought_trace(
+            f"Collision detected with Agent {peer_id}. Entering syncing state to negotiate goal overlap.",
+            "syncing",
+            {"peer_id": peer_id, "collision_id": collision_id}
+        )
         
         print("\n" + "="*50)
         print("          NEGOTIATION CONVERSE PROTOCOL")
@@ -1421,11 +1548,18 @@ class AgentRunner:
         })
         save_json(collision_file, collision)
         
+        # Load the updated state from disk before writing thought trace
+        self.state = load_json(self.state_file) or self.state
+        
+        self.add_thought_trace(
+            f"Collision deconfliction negotiation resolved. Outcome: {action.upper()}. Reason: {reason}",
+            "resolved",
+            {"action": action, "reason": reason}
+        )
+        
         print(f"Negotiation Complete. Outcome: {action.upper()}")
         print(f"Reason: {reason}")
         print("="*50 + "\n")
-        
-        self.state = load_json(self.state_file)
 
     def share_knowledge_files(self, loser_id, survivor_id):
         """Copies any files created by the losing agent to the survivor's workspace and shared workspace."""
