@@ -60,10 +60,10 @@
         </section>
 
         <!-- ─── Center: Main Viewport ─── -->
-        <section class="panel viewport" id="main-viewport">
+        <section class="panel viewport" id="main-viewport" style="position: relative;">
             <div class="viewport__tabs" id="viewport-tabs">
-                <div class="viewport__tab viewport__tab--active" data-tab="overview" data-action="switch-tab">Overview</div>
-                <div class="viewport__tab" data-tab="clusters" data-action="switch-tab">Cluster Map</div>
+                <div class="viewport__tab" data-tab="overview" data-action="switch-tab">Overview</div>
+                <div class="viewport__tab viewport__tab--active" data-tab="clusters" data-action="switch-tab">Cluster Map</div>
                 <div class="viewport__tab" data-tab="workspace" data-action="switch-tab">Workspace</div>
                 <div class="viewport__tab" data-tab="trace" data-action="switch-tab">Trace Graph</div>
                 <div class="viewport__tab" data-tab="memory" data-action="switch-tab">Memory</div>
@@ -73,16 +73,47 @@
             <div class="viewport__content" id="viewport-content">
                 <!-- Dynamic content rendered by JS -->
             </div>
+            
+            <!-- Central Initialization Overlay -->
+            <div class="init-overlay" id="init-overlay" style="display: none;">
+                <div class="init-card">
+                    <div class="init-card__header">
+                        <span class="init-card__title">Initialize Swarm Task</span>
+                        <span class="init-card__subtitle">Configure and launch your AI swarm agents for the project.</span>
+                    </div>
+                    <div class="init-card__body">
+                        <div class="form-group">
+                            <textarea class="form-input init-prompt-input" id="init-goal" placeholder="Enter a prompt to initialize your swarm... (e.g., Build a microservice for user authentication using FastAPI)"></textarea>
+                        </div>
+                        <div class="init-settings-row">
+                            <div class="form-group">
+                                <label class="form-label" for="init-provider">LLM Provider</label>
+                                <select class="form-input" id="init-provider">
+                                    <option value="ollama">Ollama</option>
+                                    <option value="gemini">Gemini</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="init-budget">Compute Budget</label>
+                                <input type="number" class="form-input" id="init-budget" value="20000" min="100" step="100">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="init-card__footer">
+                        <button class="btn btn--primary" id="init-launch-btn" data-action="init-launch">Initialize Swarm</button>
+                    </div>
+                </div>
+            </div>
         </section>
 
-        <!-- ─── Right: Alerts & Activity ─── -->
+        <!-- ─── Right: Workspace & Activity ─── -->
         <section class="panel alerts-panel" id="alerts-panel">
-            <div class="panel__header">
-                <span class="panel__title">Activity</span>
-                <span class="panel__badge" id="alerts-count">0</span>
+            <div class="panel__header" style="justify-content: flex-start; gap: 0; padding: 0; height: 35px; min-height: 35px; border-bottom: 1px solid var(--border-secondary);">
+                <div class="right-panel-tab right-panel-tab--active" id="right-tab-editor" data-action="switch-right-tab" data-tab="editor" style="flex: 1; text-align: center; height: 100%; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.77rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-bright); background: var(--bg-primary); border-right: 1px solid var(--border-secondary); border-top: 2px solid var(--accent-blue);">Code Editor</div>
+                <div class="right-panel-tab" id="right-tab-activity" data-action="switch-right-tab" data-tab="activity" style="flex: 1; text-align: center; height: 100%; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.77rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); background: var(--bg-tertiary); border-top: 2px solid transparent;">Activity <span class="panel__badge" id="alerts-count" style="margin-left: 6px;">0</span></div>
             </div>
             <div class="panel__body" id="alerts-list">
-                <!-- Budget widget, decisions, collisions, tombstones rendered by JS -->
+                <!-- Code Editor or Swarm Activity rendered dynamically by JS -->
             </div>
         </section>
 

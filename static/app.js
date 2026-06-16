@@ -23,7 +23,8 @@ const SwarmState = {
 };
 
 const UIState = {
-    activeTab: 'overview',
+    activeTab: 'clusters',
+    rightPanelTab: 'editor',
     selectedAgentId: null,
     editingAgentId: null,
     selectedWorkspaceAgent: null,
@@ -221,16 +222,115 @@ function renderAlertsPanel() {
     const list = document.getElementById('alerts-list');
     const countBadge = document.getElementById('alerts-count');
 
+    // Update active tab buttons in header
+    const tabEditor = document.getElementById('right-tab-editor');
+    const tabActivity = document.getElementById('right-tab-activity');
+    if (tabEditor && tabActivity) {
+        if (UIState.rightPanelTab === 'editor') {
+            tabEditor.classList.add('right-panel-tab--active');
+            tabEditor.style.background = 'var(--bg-primary)';
+            tabEditor.style.borderTop = '2px solid var(--accent-blue)';
+            tabEditor.style.color = 'var(--text-bright)';
+            
+            tabActivity.classList.remove('right-panel-tab--active');
+            tabActivity.style.background = 'var(--bg-tertiary)';
+            tabActivity.style.borderTop = '2px solid transparent';
+            tabActivity.style.color = 'var(--text-muted)';
+        } else {
+            tabActivity.classList.add('right-panel-tab--active');
+            tabActivity.style.background = 'var(--bg-primary)';
+            tabActivity.style.borderTop = '2px solid var(--accent-blue)';
+            tabActivity.style.color = 'var(--text-bright)';
+            
+            tabEditor.classList.remove('right-panel-tab--active');
+            tabEditor.style.background = 'var(--bg-tertiary)';
+            tabEditor.style.borderTop = '2px solid transparent';
+            tabEditor.style.color = 'var(--text-muted)';
+        }
+    }
+
     const budgetAlert = SwarmState.budget_alert || {};
     const budgetExceeded = budgetAlert.budget_exceeded || false;
 
     let alertCount = SwarmState.pending_spawns.length + SwarmState.pending_blockers.length + SwarmState.collisions.length + (budgetExceeded ? 1 : 0);
     countBadge.textContent = alertCount;
 
+    if (UIState.rightPanelTab === 'editor') {
+        list.style.padding = '0';
+        list.style.gap = '0';
+
+        if (SwarmState.agents.length === 0) {
+            list.innerHTML = `
+                <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
+                    <div class="empty-state__icon">📄</div>
+                    <div class="empty-state__title">No Swarm Task Running</div>
+                    <div class="empty-state__desc">Initialize the swarm to generate code and view workspace files here.</div>
+                </div>
+            `;
+            return;
+        }
+
+        const agentId = UIState.selectedWorkspaceAgent || SwarmState.agents[0].id;
+        
+        if (UIState.workspaceData && UIState.selectedWorkspaceAgent === agentId) {
+            const files = UIState.workspaceData.files || [];
+            const contents = UIState.workspaceData.contents || {};
+
+            if (files.length === 0) {
+                list.innerHTML = `
+                    <div style="padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
+                        <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: var(--space-xs);">Agent Workspace</div>
+                        <select class="form-select" id="change-workspace-agent" style="width: 100%; padding: 2px 6px; font-size: 0.75rem;">
+                            ${SwarmState.agents.map(a => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>Agent ${a.id} (${escapeHtml(a.personality || 'Generalist')})</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
+                        <div class="empty-state__icon">📄</div>
+                        <div class="empty-state__title">No Files Yet</div>
+                        <div class="empty-state__desc">Agent ${agentId} hasn't created any workspace files yet.</div>
+                    </div>
+                `;
+            } else {
+                const selectedFile = UIState.selectedFile || files[0];
+                const content = contents[selectedFile] || '';
+                
+                list.innerHTML = `
+                    <div style="display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm);">
+                            <span style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em;">Agent Workspace</span>
+                            <select class="form-select" id="change-workspace-agent" style="width: auto; max-width: 180px; padding: 2px 6px; font-size: 0.75rem;">
+                                ${SwarmState.agents.map(a => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>Agent ${a.id} (${escapeHtml(a.personality || 'Generalist')})</option>`).join('')}
+                            </select>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm);">
+                            <label for="change-workspace-file" style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em;">Active File</label>
+                            <select class="form-select" id="change-workspace-file" style="width: auto; max-width: 180px; padding: 2px 6px; font-size: 0.75rem;">
+                                ${files.map(f => `<option value="${escapeHtml(f)}" ${f === selectedFile ? 'selected' : ''}>${escapeHtml(f)}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="code-viewer" style="flex: 1; min-height: 0; display: flex; flex-direction: column; border: none; border-radius: 0;">
+                        <div class="code-viewer__header" style="border-radius: 0; border-left: none; border-right: none;">
+                            <span>${escapeHtml(selectedFile)}</span>
+                            <span>${content.split('\n').length} lines</span>
+                        </div>
+                        <div class="code-viewer__body" style="flex: 1; overflow: auto; font-size: 0.75rem; border-radius: 0; padding: var(--space-md); border-left: none; border-right: none; border-bottom: none; white-space: pre; font-family: var(--font-mono);">${escapeHtml(content)}</div>
+                    </div>
+                `;
+            }
+        } else {
+            list.innerHTML = '<div style="text-align: center; padding: var(--space-xl);"><div class="skeleton skeleton--card"></div><div class="skeleton skeleton--card"></div></div>';
+            loadWorkspace(agentId);
+        }
+        return;
+    }
+
+    list.style.padding = 'var(--space-xs)';
+    list.style.gap = '1px';
+
     let html = '';
 
     // Budget Widget
-    // Budget Widget — Global
     const maxTokens = budgetAlert.active_count || getMaxLeafTokens();
     const budgetCap = SwarmState.session_budget || 20000;
     const budgetPct = Math.min((maxTokens / budgetCap) * 100, 100);
@@ -326,7 +426,7 @@ function renderAlertsPanel() {
         html += '<div class="section-label">⚡ Pending Spawns</div>';
         for (const spawn of SwarmState.pending_spawns) {
             html += `
-                <div class="decision-card decision-card--spawn">
+                <div class="decision-card decision-card--spawn" data-action="approve-spawn" data-agent-id="${spawn.agent_id}" style="cursor: pointer;">
                     <div class="decision-card__type decision-card__type--spawn">SPAWN REQUEST</div>
                     <div class="decision-card__title">Agent ${escapeHtml(spawn.agent_id)}</div>
                     <div class="decision-card__desc">
@@ -1095,11 +1195,14 @@ function renderClustersTab(container) {
         if (nodeG) {
             const agentId = nodeG.dataset.agentId;
             UIState.selectedAgentId = agentId;
+            UIState.selectedWorkspaceAgent = agentId;
+            UIState.workspaceData = null;
             svgParent.querySelectorAll('.cluster-node-circle').forEach(circle => {
                 circle.classList.remove('node--selected');
             });
             nodeG.querySelector('.cluster-node-circle').classList.add('node--selected');
             renderClusterSidebar(agentId);
+            render();
         }
     });
 
@@ -1380,7 +1483,7 @@ async function loadWorkspace(agentId) {
     const data = await apiGet(`/api/workspaces/${agentId}`);
     UIState.workspaceData = data;
     UIState.selectedFile = (data.files || [])[0] || null;
-    renderViewportContent();
+    render();
 }
 
 function renderTraceTab(container) {
@@ -1833,6 +1936,13 @@ document.addEventListener('click', (e) => {
     const action = target.dataset.action;
 
     switch (action) {
+        case 'switch-right-tab':
+            UIState.rightPanelTab = target.dataset.tab;
+            render();
+            break;
+        case 'init-launch':
+            initLaunch();
+            break;
         case 'open-launch':
             openLaunchModal();
             break;
@@ -1850,6 +1960,8 @@ document.addEventListener('click', (e) => {
             break;
         case 'select-agent':
             UIState.selectedAgentId = target.dataset.agentId;
+            UIState.selectedWorkspaceAgent = target.dataset.agentId;
+            UIState.workspaceData = null;
             render();
             break;
         case 'edit-agent':
@@ -1964,15 +2076,19 @@ document.addEventListener('input', (e) => {
 
 // Handle change events for selects
 document.addEventListener('change', (e) => {
-    if (e.target.id === 'workspace-agent-select') {
+    if (e.target.id === 'workspace-agent-select' || e.target.id === 'change-workspace-agent') {
         UIState.selectedWorkspaceAgent = e.target.value;
         UIState.workspaceData = null;
-        renderViewportContent();
+        render();
     }
     if (e.target.id === 'trace-agent-select') {
         UIState.selectedTraceAgent = e.target.value;
         UIState.traceData = null;
         renderViewportContent();
+    }
+    if (e.target.id === 'change-workspace-file') {
+        UIState.selectedFile = e.target.value;
+        render();
     }
 });
 
@@ -2102,6 +2218,35 @@ function escapeHtml(str) {
 
 function escapeAttr(str) {
     return escapeHtml(str).replace(/\n/g, ' ');
+}
+
+// ---------------------------------------------------------------------------
+// Swarm Task Initialization (Overlay)
+// ---------------------------------------------------------------------------
+async function initLaunch() {
+    const goal = document.getElementById('init-goal').value.trim();
+    const provider = document.getElementById('init-provider').value;
+    const budget = parseInt(document.getElementById('init-budget').value) || 20000;
+
+    if (!goal) {
+        showToast('Please enter a task prompt to initialize the swarm', 'error');
+        return;
+    }
+
+    showToast('Configuring LLM provider...', 'info');
+    await apiPost('/api/config', { llm_provider: provider });
+
+    showToast('Initializing swarm task...', 'info');
+    const result = await apiPost('/api/run', { goal, agents: [], budget });
+    if (result.success) {
+        showToast(result.message, 'success');
+        const overlay = document.getElementById('init-overlay');
+        if (overlay) {
+            overlay.style.display = 'none';
+        }
+    } else {
+        showToast(result.message || 'Failed to initialize swarm', 'error');
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -804,6 +804,13 @@ class SwarmRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         body = self.read_body()
 
+        if path == "/api/config":
+            provider = body.get("llm_provider")
+            if provider in ["ollama", "gemini"]:
+                server_state["llm_provider"] = provider
+                write_to_monitor_log(f"LLM Provider updated to {provider} via web UI.", "INFO")
+            return self.send_json({"success": True, "llm_provider": server_state["llm_provider"]})
+
         if path == "/api/run":
             goal = body.get("goal", "")
             agents = body.get("agents", [])

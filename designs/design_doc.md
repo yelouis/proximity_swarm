@@ -252,5 +252,16 @@ To solve complex, open-ended tasks like unsolved mathematical theorems (e.g. Col
 - **Episodic Novelty Check**: The agent queries its SQLite vector episodic database. If the best-match similarity of past runs is under 0.50, the task approach is marked as novel.
 - **Novelty Spawning Gating**: If the agent is semantically isolated OR the approach is memory-novel, spawning is triggered to launch a specialized subagent (e.g. searching for computational counterexamples), accelerating execution via parallel investigation loops.
 
+## 16. Real-Time Thought Traces & Interactive Goal Pivoting
+
+To support human-in-the-loop coordination, selecting any active agent exposes a messaging timeline and decision intercept loop:
+
+- **Chronological Timeline**: Merges agent chat messages and inner-logic thoughts into a single chronological message thread. Thoughts are rendered as styled blocks with specific border-colors and icons depending on type (`evaluating`, `decision`, `executing`, `completed`, `failed`, `syncing`, `resolved`).
+- **Operator Instruction Interception**: At the start of every task execution step, the runner pauses to check for unprocessed operator chat messages. If messages are found, the runner queries the LLM (Ollama or Gemini) with details of the current goal and user directions to choose between:
+  1. `ADD_CONTEXT`: Ingest user messages as supplementary instructions while maintaining current goals.
+  2. `PIVOT`: Pivot the agent's goal directly in its state database, continuing execution in the new direction.
+- **Assistant Reflections**: Writes a thought trace explaining the reasoning behind the context or pivot decision, logging the result back to the chat timeline.
+
+
 
 

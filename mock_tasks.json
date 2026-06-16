@@ -315,6 +315,59 @@
           ]
         }
       ]
+    },
+    "task_dynamic_1781574706_0": {
+      "id": "task_dynamic_1781574706_0",
+      "goal": "Implement a basic cache mechanism in Python",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Implement core cache decorator",
+          "description": "Create a Python decorator (e.g., using functools or a custom class) to wrap a function, check for cached results based on arguments, store the result if necessary, and return the cached value.",
+          "touched_files": [
+            "cache/cache_decorator.py"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Create demonstrative usage module",
+          "description": "Define a sample 'expensive' function (e.g., one simulating an API call or complex computation) and decorate it to demonstrate cache hit and miss behavior.",
+          "touched_files": [
+            "example_cache.py"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Write unit tests for caching logic",
+          "description": "Develop unit tests using pytest to verify that the cache correctly stores results on the first call (miss) and returns stored values without re-executing the underlying function on subsequent calls (hit).",
+          "touched_files": [
+            "test/test_cache.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Refactor and cleanup documentation",
+          "description": "Review the code for clarity, add type hinting, and improve docstrings explaining how to use the cache decorator and its limitations.",
+          "touched_files": [
+            "cache/cache_decorator.py",
+            "example_cache.py"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
     }
   }
 }
