@@ -35,6 +35,12 @@ const UIState = {
     designerAgents: [
         { role: 'Generalist', goal: '' },
     ],
+    stageView: null,
+    inspectorOpen: false,
+    inspectorTab: 'overview',
+    drawerOpen: false,
+    drawerTab: 'activity',
+    initModalOpen: false,
 };
 
 let eventSource = null;
@@ -118,6 +124,25 @@ function render() {
     renderAlertsPanel();
     renderViewportContent();
     renderLogTail();
+    renderInspector();
+    renderDrawer();
+
+    // Toggle consolidated init modal / overlay
+    const initOverlay = document.getElementById('init-overlay');
+    if (initOverlay) {
+        const showInit = (SwarmState.agents.length === 0 || UIState.initModalOpen);
+        initOverlay.style.display = showInit ? 'flex' : 'none';
+        
+        // If it's shown, render designer agents
+        if (showInit) {
+            renderDesignerAgents();
+        }
+
+        const closeBtn = document.getElementById('init-close-btn');
+        if (closeBtn) {
+            closeBtn.style.display = (SwarmState.agents.length > 0) ? 'block' : 'none';
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,15 +179,15 @@ function renderStatusBar() {
     let html = '';
     html += `<span class="status-bar__item"><span class="status-bar__dot status-bar__dot--${dotCls}"></span>${stateLabel}</span>`;
     html += `<span class="status-bar__item" title="Active agents">◆ ${agents} agent${agents === 1 ? '' : 's'}</span>`;
-    html += `<span class="status-bar__item status-bar__item--clk" data-action="switch-right-tab" data-tab="activity" title="Token budget — open Activity">⛁ ${used.toLocaleString()} / ${cap.toLocaleString()}</span>`;
+    html += `<span class="status-bar__item status-bar__item--clk" data-action="open-drawer" data-tab="activity" title="Token budget — open Activity">⛁ ${used.toLocaleString()} / ${cap.toLocaleString()}</span>`;
     html += `<span class="status-bar__spacer"></span>`;
     if (decisions > 0) {
-        html += `<span class="status-bar__item status-bar__item--alert status-bar__item--clk" data-action="switch-right-tab" data-tab="activity" title="Pending decisions">🔔 ${decisions} decision${decisions === 1 ? '' : 's'}</span>`;
+        html += `<span class="status-bar__item status-bar__item--alert status-bar__item--clk" data-action="open-drawer" data-tab="activity" title="Pending decisions">🔔 ${decisions} decision${decisions === 1 ? '' : 's'}</span>`;
     }
     if (collisions > 0) {
         html += `<span class="status-bar__item" title="Active collisions">⚡ ${collisions}</span>`;
     }
-    html += `<span class="status-bar__item status-bar__item--clk" data-action="switch-tab" data-tab="logs" title="View logs">📜 Logs</span>`;
+    html += `<span class="status-bar__item status-bar__item--clk" data-action="open-drawer" data-tab="logs" title="View logs">📜 Logs</span>`;
     if (lastLog) {
         html += `<span class="status-bar__item status-bar__item--log">${escapeHtml(lastLog)}</span>`;
     }
@@ -200,7 +225,8 @@ function renderAgentSidebar() {
 
         html += `
             <div class="agent-card agent-card--${status} ${isSelected ? 'agent-card--selected' : ''}"
-                 data-action="select-agent" data-agent-id="${agent.id}">
+                 data-action="select-agent" data-agent-id="${agent.id}"
+                 ondblclick="UIState.inspectorOpen=true; UIState.selectedAgentId='${agent.id}'; UIState.selectedWorkspaceAgent='${agent.id}'; UIState.workspaceData=null; render();">
                 <div class="agent-card__header">
                     <span class="agent-card__id">Agent ${agent.id}</span>
                     <span class="agent-card__status agent-card__status--${status}">${statusLabel(status)}</span>
@@ -212,8 +238,8 @@ function renderAgentSidebar() {
                 </div>
                 <div class="agent-card__actions">
                     <button class="btn btn--sm btn--ghost" data-action="view-workspace" data-agent-id="${agent.id}" title="View workspace">📁</button>
-                    <button class="btn btn--sm btn--ghost" data-action="view-trace" data-agent-id="${agent.id}" title="View trace">🔍</button>
-                    <button class="btn btn--sm btn--ghost" data-action="edit-agent" data-agent-id="${agent.id}" title="Edit agent">✏️</button>
+                    <button class="btn btn--sm btn--ghost" data-action="open-inspector" data-agent-id="${agent.id}" data-tab="trace" title="View causal trace">🔍</button>
+                    <button class="btn btn--sm btn--ghost" data-action="open-inspector" data-agent-id="${agent.id}" data-tab="overview" title="Open inspector">ℹ️</button>
                     ${status !== 'completed' && status !== 'dead' ? `<button class="btn btn--sm btn--danger" data-action="prune-agent" data-agent-id="${agent.id}" title="Prune agent">✕</button>` : ''}
                 </div>
             </div>
@@ -257,308 +283,85 @@ function renderAlertsPanel() {
     const list = document.getElementById('alerts-list');
     const countBadge = document.getElementById('alerts-count');
 
-    // Update active tab buttons in header
-    const tabEditor = document.getElementById('right-tab-editor');
-    const tabActivity = document.getElementById('right-tab-activity');
-    if (tabEditor && tabActivity) {
-        if (UIState.rightPanelTab === 'editor') {
-            tabEditor.classList.add('right-panel-tab--active');
-            tabEditor.style.background = 'var(--bg-primary)';
-            tabEditor.style.borderTop = '2px solid var(--accent-blue)';
-            tabEditor.style.color = 'var(--text-bright)';
-            
-            tabActivity.classList.remove('right-panel-tab--active');
-            tabActivity.style.background = 'var(--bg-tertiary)';
-            tabActivity.style.borderTop = '2px solid transparent';
-            tabActivity.style.color = 'var(--text-muted)';
-        } else {
-            tabActivity.classList.add('right-panel-tab--active');
-            tabActivity.style.background = 'var(--bg-primary)';
-            tabActivity.style.borderTop = '2px solid var(--accent-blue)';
-            tabActivity.style.color = 'var(--text-bright)';
-            
-            tabEditor.classList.remove('right-panel-tab--active');
-            tabEditor.style.background = 'var(--bg-tertiary)';
-            tabEditor.style.borderTop = '2px solid transparent';
-            tabEditor.style.color = 'var(--text-muted)';
-        }
-    }
-
     const budgetAlert = SwarmState.budget_alert || {};
     const budgetExceeded = budgetAlert.budget_exceeded || false;
 
     let alertCount = SwarmState.pending_spawns.length + SwarmState.pending_blockers.length + SwarmState.collisions.length + (budgetExceeded ? 1 : 0);
-    countBadge.textContent = alertCount;
+    if (countBadge) {
+        countBadge.textContent = alertCount;
+    }
 
-    if (UIState.rightPanelTab === 'editor') {
-        list.style.padding = '0';
-        list.style.gap = '0';
+    list.style.padding = '0';
+    list.style.gap = '0';
 
-        if (SwarmState.agents.length === 0) {
-            list.innerHTML = `
-                <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
-                    <div class="empty-state__icon">📄</div>
-                    <div class="empty-state__title">No Swarm Task Running</div>
-                    <div class="empty-state__desc">Initialize the swarm to generate code and view workspace files here.</div>
-                </div>
-            `;
-            return;
-        }
-
-        const agentId = UIState.selectedWorkspaceAgent || SwarmState.agents[0].id;
-        
-        if (UIState.workspaceData && UIState.selectedWorkspaceAgent === agentId) {
-            const files = UIState.workspaceData.files || [];
-            const contents = UIState.workspaceData.contents || {};
-
-            if (files.length === 0) {
-                list.innerHTML = `
-                    <div style="padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
-                        <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: var(--space-xs);">Agent Workspace</div>
-                        <select class="form-select" id="change-workspace-agent" style="width: 100%; padding: 2px 6px; font-size: 0.75rem;">
-                            ${SwarmState.agents.map(a => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>Agent ${a.id} (${escapeHtml(a.personality || 'Generalist')})</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
-                        <div class="empty-state__icon">📄</div>
-                        <div class="empty-state__title">No Files Yet</div>
-                        <div class="empty-state__desc">Agent ${agentId} hasn't created any workspace files yet.</div>
-                    </div>
-                `;
-            } else {
-                const selectedFile = UIState.selectedFile || files[0];
-                const content = contents[selectedFile] || '';
-                
-                list.innerHTML = `
-                    <div style="display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm);">
-                            <span style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em;">Agent Workspace</span>
-                            <select class="form-select" id="change-workspace-agent" style="width: auto; max-width: 180px; padding: 2px 6px; font-size: 0.75rem;">
-                                ${SwarmState.agents.map(a => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>Agent ${a.id} (${escapeHtml(a.personality || 'Generalist')})</option>`).join('')}
-                            </select>
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm);">
-                            <label for="change-workspace-file" style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em;">Active File</label>
-                            <select class="form-select" id="change-workspace-file" style="width: auto; max-width: 180px; padding: 2px 6px; font-size: 0.75rem;">
-                                ${files.map(f => `<option value="${escapeHtml(f)}" ${f === selectedFile ? 'selected' : ''}>${escapeHtml(f)}</option>`).join('')}
-                            </select>
-                        </div>
-                    </div>
-                    <div class="code-viewer" style="flex: 1; min-height: 0; display: flex; flex-direction: column; border: none; border-radius: 0;">
-                        <div class="code-viewer__header" style="border-radius: 0; border-left: none; border-right: none;">
-                            <span>${escapeHtml(selectedFile)}</span>
-                            <span>${content.split('\n').length} lines</span>
-                        </div>
-                        <div class="code-viewer__body" style="flex: 1; overflow: auto; font-size: 0.75rem; border-radius: 0; padding: var(--space-md); border-left: none; border-right: none; border-bottom: none; white-space: pre; font-family: var(--font-mono);">${escapeHtml(content)}</div>
-                    </div>
-                `;
-            }
-        } else {
-            list.innerHTML = '<div style="text-align: center; padding: var(--space-xl);"><div class="skeleton skeleton--card"></div><div class="skeleton skeleton--card"></div></div>';
-            loadWorkspace(agentId);
-        }
+    if (SwarmState.agents.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
+                <div class="empty-state__icon">📄</div>
+                <div class="empty-state__title">No Swarm Task Running</div>
+                <div class="empty-state__desc">Initialize the swarm to generate code and view workspace files here.</div>
+            </div>
+        `;
         return;
     }
 
-    list.style.padding = 'var(--space-xs)';
-    list.style.gap = '1px';
+    const agentId = UIState.selectedWorkspaceAgent || SwarmState.agents[0].id;
+    
+    if (UIState.workspaceData && UIState.selectedWorkspaceAgent === agentId) {
+        const files = UIState.workspaceData.files || [];
+        const contents = UIState.workspaceData.contents || {};
 
-    let html = '';
-
-    // Budget Widget
-    const maxTokens = budgetAlert.active_count || getMaxLeafTokens();
-    const budgetCap = SwarmState.session_budget || 20000;
-    const budgetPct = Math.min((maxTokens / budgetCap) * 100, 100);
-    const budgetBarClass = budgetPct > 90 ? 'budget-widget__bar-fill--exceeded' : budgetPct > 70 ? 'budget-widget__bar-fill--warning' : '';
-
-    html += `
-        <div class="budget-widget">
-            <div class="budget-widget__label">Global Token Budget</div>
-            <div class="budget-widget__value ${budgetExceeded ? 'budget-widget__value--exceeded' : ''}"
-                 data-action="edit-budget" title="Click to edit global budget cap">
-                ${maxTokens.toLocaleString()} / ${budgetCap.toLocaleString()}
-            </div>
-            <div class="budget-widget__bar">
-                <div class="budget-widget__bar-fill ${budgetBarClass}" style="width: ${budgetPct}%"></div>
-            </div>
-        </div>
-    `;
-
-    // Per-Agent Budget Tree
-    const perAgentStatus = budgetAlert.per_agent_status || [];
-    if (perAgentStatus.length > 0 || SwarmState.agents.length > 0) {
-        html += '<div class="budget-tree">';
-        html += '<div class="budget-tree__section-label">Per-Agent Budget</div>';
-
-        const agentBudgetData = perAgentStatus.length > 0 ? perAgentStatus :
-            SwarmState.agents
-                .filter(a => ['exploring', 'syncing', 'pending_termination'].includes(a.status))
-                .map(a => ({
-                    id: a.id,
-                    output_tokens: a.output_tokens || 0,
-                    token_budget: a.token_budget || budgetCap,
-                    pct: Math.round(((a.output_tokens || 0) / Math.max(a.token_budget || budgetCap, 1)) * 100),
-                }));
-
-        for (const agentBdg of agentBudgetData) {
-            const pct = Math.min(agentBdg.pct || 0, 100);
-            const colorClass = pct > 90 ? 'red' : pct > 60 ? 'amber' : 'green';
-            const nodeClass = pct > 90 ? 'budget-tree__node--exceeded' : pct > 60 ? 'budget-tree__node--warning' : 'budget-tree__node--ok';
-            html += `
-                <div class="budget-tree__node ${nodeClass}">
-                    <div class="budget-tree__header">
-                        <span class="budget-tree__id">Agent ${escapeHtml(agentBdg.id)}</span>
-                        <span class="budget-tree__value budget-tree__value--${colorClass}">${(agentBdg.output_tokens || 0).toLocaleString()} / ${(agentBdg.token_budget || budgetCap).toLocaleString()}</span>
-                    </div>
-                    <div class="budget-tree__bar">
-                        <div class="budget-tree__bar-fill budget-tree__bar-fill--${colorClass}" style="width: ${pct}%"></div>
-                    </div>
-                    <span class="budget-tree__action" data-action="edit-agent-budget" data-agent-id="${agentBdg.id}">✏️ Set budget</span>
+        if (files.length === 0) {
+            list.innerHTML = `
+                <div style="padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
+                    <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: var(--space-xs);">Agent Workspace</div>
+                    <select class="form-select" id="change-workspace-agent" style="width: 100%; padding: 2px 6px; font-size: 0.75rem;">
+                        ${SwarmState.agents.map(a => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>Agent ${a.id} (${escapeHtml(a.personality || 'Generalist')})</option>`).join('')}
+                    </select>
+                </div>
+                <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
+                    <div class="empty-state__icon">📄</div>
+                    <div class="empty-state__title">No Files Yet</div>
+                    <div class="empty-state__desc">Agent ${agentId} hasn't created any workspace files yet.</div>
                 </div>
             `;
-        }
+        } else {
+            const selectedFile = UIState.selectedFile || files[0];
+            const content = contents[selectedFile] || '';
+            
+            const fileTabsHtml = files.map(f => {
+                const isActive = f === selectedFile;
+                return `<button class="editor-tab ${isActive ? 'editor-tab--active' : ''}" data-action="select-file" data-file="${escapeAttr(f)}">${escapeHtml(f)}</button>`;
+            }).join('');
 
-        // Subtree alerts
-        const subtreeAlerts = budgetAlert.subtree_alerts || [];
-        for (const sa of subtreeAlerts) {
-            html += `
-                <div class="subtree-alert">
-                    ⚠ Subtree budget exceeded for Agent ${escapeHtml(sa.parent_id)}: 
-                    ${(sa.subtree_used || 0).toLocaleString()} / ${(sa.subtree_budget || 0).toLocaleString()} (${sa.pct}%)
-                </div>
-            `;
-        }
+            const breadcrumb = `src › agent_${agentId} › ${selectedFile.split('/').join(' › ')}`;
+            const lines = content.split('\n');
+            const lineNumbersHtml = lines.map((_, idx) => `<div class="editor-line-number">${idx + 1}</div>`).join('');
+            const linesHtml = lines.map(line => `<div class="editor-code-line">${escapeHtml(line) || '&nbsp;'}</div>`).join('');
 
-        html += '</div>';
-    }
-
-    if (budgetExceeded) {
-        html += `
-            <div class="decision-card decision-card--blocker">
-                <div class="decision-card__type decision-card__type--blocker">BUDGET EXCEEDED</div>
-                <div class="decision-card__title">Output tokens cap reached!</div>
-                <div class="decision-card__desc" style="margin-bottom: 0;">
-                    Leaf agent tokens: <strong>${maxTokens.toLocaleString()}</strong> / Cap: <strong>${budgetCap.toLocaleString()}</strong>
-                    <br><br>
-                    <strong>Leaf Pruning Candidates:</strong>
-                    <div style="margin-top: var(--space-sm); display: flex; flex-direction: column; gap: var(--space-sm);">
-                        ${(budgetAlert.candidates || []).map((c) => `
-                            <div style="border-top: 1px solid var(--border-secondary); padding-top: var(--space-xs);">
-                                <div style="font-family: var(--font-mono); font-weight: 600; color: var(--accent-cyan); font-size: 0.72rem; margin-bottom: 2px;">Agent ${escapeHtml(c.id)}</div>
-                                <div style="font-size: 0.68rem; color: var(--text-secondary); margin-bottom: var(--space-xs); line-height: 1.4;">${escapeHtml(c.reason || 'No explanation')}</div>
-                                <button class="btn btn--danger btn--sm" data-action="prune-agent" data-agent-id="${c.id}">🔥 Prune Agent ${c.id}</button>
-                            </div>
-                        `).join('')}
-                        ${(budgetAlert.candidates || []).length === 0 ? '<div style="font-size: 0.68rem; color: var(--text-muted);">No candidates to prune.</div>' : ''}
+            list.innerHTML = `
+                <div style="display: flex; flex-direction: column; height: 100%;">
+                    <div class="editor-tabs-container" style="display: flex; overflow-x: auto; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-secondary); flex-shrink: 0;">
+                        ${fileTabsHtml}
                     </div>
-                </div>
-            </div>
-        `;
-    }
-
-    // Pending Spawn Decisions
-    if (SwarmState.pending_spawns.length > 0) {
-        html += '<div class="section-label">⚡ Pending Spawns</div>';
-        for (const spawn of SwarmState.pending_spawns) {
-            html += `
-                <div class="decision-card decision-card--spawn" data-action="approve-spawn" data-agent-id="${spawn.agent_id}" style="cursor: pointer;">
-                    <div class="decision-card__type decision-card__type--spawn">SPAWN REQUEST</div>
-                    <div class="decision-card__title">Agent ${escapeHtml(spawn.agent_id)}</div>
-                    <div class="decision-card__desc">
-                        <strong>Goal:</strong> ${escapeHtml(spawn.goal)}<br>
-                        <strong>Reason:</strong> ${escapeHtml(spawn.reason)}
+                    <div class="editor-breadcrumb" style="padding: 4px var(--space-md); background: var(--bg-secondary); border-bottom: 1px solid var(--border-secondary); font-size: 0.68rem; color: var(--text-secondary); flex-shrink: 0; font-family: var(--font-sans);">
+                        ${breadcrumb}
                     </div>
-                    <div class="decision-card__actions">
-                        <button class="btn btn--success btn--sm" data-action="approve-spawn" data-agent-id="${spawn.agent_id}">✓ Approve</button>
-                        <button class="btn btn--danger btn--sm" data-action="reject-spawn" data-agent-id="${spawn.agent_id}">✕ Reject</button>
-                    </div>
-                </div>
-            `;
-        }
-    }
-
-    // Pending Blockers
-    if (SwarmState.pending_blockers.length > 0) {
-        html += '<div class="section-label">🚧 Blockers</div>';
-        for (const blocker of SwarmState.pending_blockers) {
-            const blk = blocker.blocker || {};
-            html += `
-                <div class="decision-card decision-card--blocker">
-                    <div class="decision-card__type decision-card__type--blocker">BLOCKER</div>
-                    <div class="decision-card__title">Agent ${escapeHtml(blocker.agent_id)}</div>
-                    <div class="decision-card__desc">
-                        <strong>File:</strong> ${escapeHtml(blk.file_path || 'N/A')}<br>
-                        <strong>Tool:</strong> ${escapeHtml(blk.tool_used || 'N/A')}<br>
-                        <strong>Error:</strong> ${escapeHtml(blk.error_message || 'Unknown error')}
-                    </div>
-                    <div class="decision-card__actions">
-                        <button class="btn btn--success btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="1">🔧 Workaround</button>
-                        <button class="btn btn--warning btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="2">⏭ Bypass</button>
-                        <button class="btn btn--danger btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="3">💀 Kill</button>
-                    </div>
-                </div>
-            `;
-        }
-    }
-
-    // Collisions
-    if (SwarmState.collisions.length > 0) {
-        html += '<div class="section-label">⚡ Collisions</div>';
-        for (const col of SwarmState.collisions) {
-            html += `
-                <div class="collision-entry">
-                    <div class="collision-entry__agents">
-                        Agent ${escapeHtml(col.agent_a || '?')} ↔ Agent ${escapeHtml(col.agent_b || '?')}
-                    </div>
-                    <div class="collision-entry__detail">
-                        Distance: ${(col.distance || 0).toFixed(3)} | Status: ${escapeHtml(col.status || 'active')}
-                    </div>
-                </div>
-            `;
-        }
-    }
-
-    // Tombstones
-    if (SwarmState.tombstones.length > 0) {
-        html += '<div class="section-label">💀 Tombstones</div>';
-        for (const tomb of SwarmState.tombstones) {
-            if (tomb.file_path) {
-                html += `
-                    <div class="tombstone-entry">
-                        <div class="tombstone-entry__agent">⚡ BLOCKER FAILURE</div>
-                        <div class="tombstone-entry__reason" style="line-height: 1.45;">
-                            <strong>File:</strong> ${escapeHtml(tomb.file_path)}<br>
-                            <strong>Tool:</strong> ${escapeHtml(tomb.tool_used)}<br>
-                            <strong>Error:</strong> <span style="color: var(--accent-red);">${escapeHtml(tomb.error_message)}</span><br>
-                            <strong>Fix:</strong> <span style="color: var(--accent-green);">${escapeHtml(tomb.fix_action)}</span>
+                    <div class="editor-body" style="flex: 1; display: flex; overflow: auto; background: var(--bg-primary); font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.5;">
+                        <div class="editor-line-numbers" style="padding: var(--space-sm) var(--space-xs); text-align: right; color: var(--text-muted); border-right: 1px solid var(--border-secondary); user-select: none; background: var(--bg-secondary); min-width: 30px; flex-shrink: 0;">
+                            ${lineNumbersHtml}
+                        </div>
+                        <div class="editor-code" style="padding: var(--space-sm) var(--space-md); color: var(--text-bright); white-space: pre; flex: 1; overflow: auto;">
+                            ${linesHtml}
                         </div>
                     </div>
-                `;
-            } else {
-                html += `
-                    <div class="tombstone-entry">
-                        <div class="tombstone-entry__agent">💀 Agent ${escapeHtml(tomb.agent_id || '?')}</div>
-                        <div class="tombstone-entry__reason" style="line-height: 1.45;">
-                            <strong>Status:</strong> ${tomb.is_pruned ? 'Pruned' : 'Terminated'}<br>
-                            <strong>Goal:</strong> ${escapeHtml(tomb.goal || '')}<br>
-                            <strong>Reason:</strong> ${escapeHtml(tomb.reason || 'No reason')}
-                        </div>
-                    </div>
-                `;
-            }
+                </div>
+            `;
         }
+    } else {
+        list.innerHTML = '<div style="text-align: center; padding: var(--space-xl);"><div class="skeleton skeleton--card"></div><div class="skeleton skeleton--card"></div></div>';
+        loadWorkspace(agentId);
     }
-
-    // Empty state
-    if (!html.includes('decision-card') && !html.includes('collision-entry') && !html.includes('tombstone-entry') && !budgetExceeded) {
-        html += `
-            <div style="padding: var(--space-lg); text-align: center; color: var(--text-muted); font-size: 0.78rem;">
-                💤 No active alerts or decisions pending.
-            </div>
-        `;
-    }
-
-    list.innerHTML = html;
 }
 
 function getMaxLeafTokens() {
@@ -597,7 +400,7 @@ function renderViewportContent() {
             renderOverviewTab(container);
             break;
         case 'clusters':
-            renderClustersTab(container);
+            renderStage(container);
             break;
         case 'workspace':
             renderWorkspaceTab(container);
@@ -947,7 +750,124 @@ async function saveWorkspaceAgentEdits(agentId) {
     }
 }
 
-function renderClustersTab(container) {
+function calculateJaccard(setA, setB) {
+    if (setA.size === 0 && setB.size === 0) return 0;
+    const intersect = new Set([...setA].filter(x => setB.has(x)));
+    const union = new Set([...setA, ...setB]);
+    return intersect.size / union.size;
+}
+
+function tokenizeGoal(goalText) {
+    if (!goalText) return new Set();
+    const words = goalText.toLowerCase()
+        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, '')
+        .split(/\s+/)
+        .filter(w => w.length > 2);
+    return new Set(words);
+}
+
+function calculateAgentDistance(a1, a2) {
+    const g1 = tokenizeGoal(a1.goal || '');
+    const g2 = tokenizeGoal(a2.goal || '');
+    const goalSim = calculateJaccard(g1, g2);
+
+    const f1 = new Set(a1.touched_files || []);
+    const f2 = new Set(a2.touched_files || []);
+    const fileSim = calculateJaccard(f1, f2);
+
+    const t1 = new Set(a1.tools_used || []);
+    const t2 = new Set(a2.tools_used || []);
+    const toolSim = calculateJaccard(t1, t2);
+
+    const distance = 0.5 * (1.0 - goalSim) + 0.3 * (1.0 - fileSim) + 0.2 * (1.0 - toolSim);
+    return { distance, goalSim, fileSim, toolSim };
+}
+
+function renderClusterSidebar(agentId, container) {
+    if (!container) return;
+    if (!agentId) {
+        container.innerHTML = `
+            <div style="flex:1; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--text-muted); font-size:0.75rem;">
+                💡 Click an agent node in the cluster map to view detailed task similarities and actions.
+            </div>
+        `;
+        return;
+    }
+
+    const agent = SwarmState.agents.find(a => a.id === agentId);
+    if (!agent) return;
+
+    const listSims = [];
+    for (const other of SwarmState.agents) {
+        if (other.id !== agentId) {
+            const res = calculateAgentDistance(agent, other);
+            listSims.push({
+                agent: other,
+                distance: res.distance,
+                goalSim: res.goalSim,
+                fileSim: res.fileSim,
+                toolSim: res.toolSim
+            });
+        }
+    }
+    listSims.sort((a, b) => a.distance - b.distance);
+
+    const statusColor = {
+        exploring: 'var(--accent-cyan)',
+        completed: 'var(--accent-green)',
+        dead: 'var(--accent-red)',
+        syncing: 'var(--accent-amber)',
+        pending_termination: 'var(--accent-red)',
+    }[agent.status] || 'var(--text-muted)';
+
+    let sidebarHtml = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-md);">
+            <h3 style="font-family:var(--font-mono); font-size:0.92rem; font-weight:600; color:var(--accent-cyan); margin:0;">Agent ${agent.id}</h3>
+            <span style="font-size: 0.62rem; font-weight: 600; text-transform: uppercase; padding: 1px 6px; border-radius: var(--radius-sm); background: ${statusColor}22; color: ${statusColor};">${agent.status || 'unknown'}</span>
+        </div>
+        
+        <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:var(--space-xs); font-weight:600;">ROLE:</div>
+        <div style="font-size:0.78rem; color:var(--text-primary); margin-bottom:var(--space-md);">${escapeHtml(agent.personality || agent.role || 'Generalist')}</div>
+        
+        <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:var(--space-xs); font-weight:600;">CURRENT GOAL:</div>
+        <div style="font-size:0.78rem; color:var(--text-primary); margin-bottom:var(--space-md); line-height:1.4;">${escapeHtml(agent.goal || '')}</div>
+        
+        <div style="display:flex; flex-direction:column; gap:var(--space-xs); margin-bottom:var(--space-xl);">
+            <button class="btn btn--primary btn--sm" data-action="view-workspace" data-agent-id="${agent.id}" style="justify-content:center; padding: var(--space-sm) 0;">📁 Browse Workspace</button>
+            <button class="btn btn--sm" data-action="view-trace" data-agent-id="${agent.id}" style="justify-content:center; padding: var(--space-sm) 0;">🔍 View Causal Trace</button>
+            <button class="btn btn--ghost btn--sm" data-action="edit-agent" data-agent-id="${agent.id}" style="justify-content:center; padding: var(--space-sm) 0;">✏️ Edit Goal/Role</button>
+        </div>
+        
+        <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:var(--space-sm); font-weight:600; text-transform:uppercase; border-top: 1px solid var(--border-secondary); padding-top: var(--space-md);">Task Similarity Metrics</div>
+    `;
+
+    if (listSims.length === 0) {
+        sidebarHtml += `<div style="font-size:0.7rem; color:var(--text-muted);">No other agents in the swarm.</div>`;
+    } else {
+        sidebarHtml += `<div style="display:flex; flex-direction:column; gap:var(--space-sm);">`;
+        for (const sim of listSims) {
+            const levelColor = sim.distance < 0.5 ? 'var(--accent-amber)' : 'var(--text-muted)';
+            sidebarHtml += `
+                <div style="background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:var(--radius-sm); padding:var(--space-sm);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-xs);">
+                        <span style="font-family:var(--font-mono); font-size:0.72rem; font-weight:600; color:var(--accent-cyan);">Agent ${sim.agent.id}</span>
+                        <span style="font-family:var(--font-mono); font-size:0.68rem; font-weight:600; color:${levelColor};">Dist: ${sim.distance.toFixed(3)}</span>
+                    </div>
+                    <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 4px; text-align:center; font-size:0.6rem; color:var(--text-muted);">
+                        <div>Goal: ${(sim.goalSim * 100).toFixed(0)}%</div>
+                        <div>Files: ${(sim.fileSim * 100).toFixed(0)}%</div>
+                        <div>Tools: ${(sim.toolSim * 100).toFixed(0)}%</div>
+                    </div>
+                </div>
+            `;
+        }
+        sidebarHtml += `</div>`;
+    }
+
+    container.innerHTML = sidebarHtml;
+}
+
+function renderSwarmMap(container) {
     if (SwarmState.agents.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -965,13 +885,23 @@ function renderClustersTab(container) {
     }
 
     container.innerHTML = `
-        <div class="cluster-view-container">
-            <div class="cluster-map-canvas" id="cluster-svg-parent"></div>
-            <div class="cluster-sidebar" id="cluster-sidebar-content"></div>
+        <div style="display: flex; flex-direction: column; height: 100%;">
+            <div class="map-legend" style="display: flex; flex-wrap: wrap; gap: var(--space-md); padding: var(--space-sm) var(--space-xl); background: var(--bg-secondary); border-bottom: 1px solid var(--border-secondary); font-size: 0.72rem; color: var(--text-secondary); flex-shrink: 0;">
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green);"></span>Exploring</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);"></span>Idle</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-blue-light);"></span>Completed</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-blue);"></span>Needs Input</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-orange);"></span>Low Budget</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 16px; height: 2px; background: var(--border-primary);"></span>Parent → Child</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 16px; height: 2px; border-top: 2px dashed var(--accent-purple);"></span>Redundancy Link</span>
+            </div>
+            <div class="cluster-view-container" style="flex: 1; min-height: 0;">
+                <div class="cluster-map-canvas" id="cluster-svg-parent"></div>
+                <div class="cluster-sidebar" id="cluster-sidebar-content"></div>
+            </div>
         </div>
     `;
 
-    // 1. Hierarchical Tree Construction
     const nodeMap = {};
     for (const agent of SwarmState.agents) {
         nodeMap[agent.id] = {
@@ -996,11 +926,10 @@ function renderClustersTab(container) {
         }
     }
 
-    // 2. Position Nodes Orbitally (Phase A: compute tree sizes relative to 0,0)
     function layoutNode(node, level, parentAngle) {
         const k = node.children.length;
         if (k === 0) {
-            node.radius = 70; // Base radius to hold text descriptions comfortably
+            node.radius = 70;
             return;
         }
 
@@ -1035,7 +964,6 @@ function renderClustersTab(container) {
         layoutNode(root, 1);
     }
 
-    // Phase B: Space roots on screen and shift descendants
     const cx = 500;
     const cy = 300;
     
@@ -1066,7 +994,6 @@ function renderClustersTab(container) {
         }
     }
 
-    // Proximity linkages calculation
     const listAgents = SwarmState.agents;
     const links = [];
     for (let i = 0; i < listAgents.length; i++) {
@@ -1091,41 +1018,13 @@ function renderClustersTab(container) {
         }
     }
 
-    function calculateJaccard(setA, setB) {
-        if (setA.size === 0 && setB.size === 0) return 0;
-        const intersect = new Set([...setA].filter(x => setB.has(x)));
-        const union = new Set([...setA, ...setB]);
-        return intersect.size / union.size;
-    }
-
-    function tokenizeGoal(goalText) {
-        if (!goalText) return new Set();
-        const words = goalText.toLowerCase()
-            .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, '')
-            .split(/\s+/)
-            .filter(w => w.length > 2);
-        return new Set(words);
-    }
-
-    function calculateAgentDistance(a1, a2) {
-        const g1 = tokenizeGoal(a1.goal || '');
-        const g2 = tokenizeGoal(a2.goal || '');
-        const goalSim = calculateJaccard(g1, g2);
-
-        const f1 = new Set(a1.touched_files || []);
-        const f2 = new Set(a2.touched_files || []);
-        const fileSim = calculateJaccard(f1, f2);
-
-        const t1 = new Set(a1.tools_used || []);
-        const t2 = new Set(a2.tools_used || []);
-        const toolSim = calculateJaccard(t1, t2);
-
-        const distance = 0.5 * (1.0 - goalSim) + 0.3 * (1.0 - fileSim) + 0.2 * (1.0 - toolSim);
-        return { distance, goalSim, fileSim, toolSim };
-    }
-
     const svgParent = document.getElementById('cluster-svg-parent');
-    let svgHtml = `<svg class="cluster-svg" viewBox="0 0 1000 600" width="100%" height="100%">`;
+    let svgHtml = `<svg class="cluster-svg" viewBox="0 0 1000 600" width="100%" height="100%">
+        <defs>
+            <marker id="arrow" markerWidth="7" markerHeight="7" refX="29" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-primary)"/>
+            </marker>
+        </defs>`;
 
     // Boundaries
     function drawBoundaries(node) {
@@ -1144,7 +1043,14 @@ function renderClustersTab(container) {
         drawBoundaries(root);
     }
 
-    // Links
+    // Parent -> child directional edges
+    for (const node of Object.values(nodeMap)) {
+        if (node.parent) {
+            svgHtml += `<line class="cluster-edge" x1="${node.parent.x}" y1="${node.parent.y}" x2="${node.x}" y2="${node.y}" marker-end="url(#arrow)" style="stroke: var(--border-primary); stroke-width: 1.4; opacity: 0.6;"/>`;
+        }
+    }
+
+    // Links (Proximity)
     for (const link of links) {
         const n1 = nodeMap[link.source];
         const n2 = nodeMap[link.target];
@@ -1197,9 +1103,23 @@ function renderClustersTab(container) {
         const goalSnippet = escapeHtml(truncate(agent.goal || '', 24));
         const budgetLabel = `${agentTokens.toLocaleString()}/${agentBudget.toLocaleString()} (${budgetPctCluster}%)`;
 
+        const needsInput = SwarmState.pending_spawns.some(s => s.agent_id === agent.id) ||
+                           SwarmState.pending_blockers.some(b => b.agent_id === agent.id) ||
+                           agent.status === 'pending_termination' ||
+                           agent.status === 'syncing';
+        const lowBudget = budgetPctCluster > 90;
+
         svgHtml += `
             <g class="cluster-node" data-agent-id="${agent.id}">
-                <g class="cluster-node-g">
+                <g class="cluster-node-g">`;
+        
+        if (needsInput) {
+            svgHtml += `<circle cx="${node.x}" cy="${node.y}" r="29" fill="none" stroke="var(--accent-blue)" stroke-width="2"/>`;
+        } else if (lowBudget) {
+            svgHtml += `<circle cx="${node.x}" cy="${node.y}" r="29" fill="none" stroke="var(--accent-orange)" stroke-width="2"/>`;
+        }
+
+        svgHtml += `
                     <circle class="cluster-node-circle ${statusClass} ${budgetColorClass}" cx="${node.x}" cy="${node.y}" r="22" />
                     <text class="cluster-node-text" x="${node.x}" y="${node.y}">${agent.id}</text>
                     
@@ -1238,97 +1158,204 @@ function renderClustersTab(container) {
                 circle.classList.remove('node--selected');
             });
             nodeG.querySelector('.cluster-node-circle').classList.add('node--selected');
-            renderClusterSidebar(agentId);
+            renderClusterSidebar(agentId, document.getElementById('cluster-sidebar-content'));
+            render();
+        }
+    });
+
+    svgParent.querySelector('svg').addEventListener('dblclick', (e) => {
+        const nodeG = e.target.closest('.cluster-node');
+        if (nodeG) {
+            const agentId = nodeG.dataset.agentId;
+            UIState.selectedAgentId = agentId;
+            UIState.inspectorOpen = true;
             render();
         }
     });
 
     const selectedId = UIState.selectedAgentId || (SwarmState.agents.length > 0 ? SwarmState.agents[0].id : null);
-    renderClusterSidebar(selectedId);
+    renderClusterSidebar(selectedId, document.getElementById('cluster-sidebar-content'));
+}
 
-    function renderClusterSidebar(agentId) {
-        const sidebarContent = document.getElementById('cluster-sidebar-content');
-        if (!agentId) {
-            sidebarContent.innerHTML = `
-                <div style="flex:1; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--text-muted); font-size:0.75rem;">
-                    💡 Click an agent node in the cluster map to view detailed task similarities and actions.
+function renderStage(container) {
+    if (SwarmState.agents.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state__icon">🗺️</div>
+                <div class="empty-state__title">No Active Swarm</div>
+                <div class="empty-state__desc">Launch a new swarm to visualize task network map.</div>
+            </div>
+        `;
+        return;
+    }
+    const n = SwarmState.agents.length;
+    if (UIState.stageView == null) {
+        UIState.stageView = (n > 1) ? 'map' : 'timeline';
+    }
+    const view = UIState.stageView;
+    container.innerHTML = `
+        <div class="stage" style="display:flex; flex-direction:column; height:100%;">
+            <div class="stage__toolbar" style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border-bottom:1px solid var(--border-secondary); background:var(--bg-secondary); flex-shrink:0;">
+                <div class="seg" style="display:inline-flex; border:1px solid var(--border-primary); border-radius:var(--radius-sm); overflow:hidden;">
+                    <button class="seg__btn ${view === 'map' ? 'seg__btn--on' : ''}" data-action="toggle-stage" data-stage="map" style="font-size:0.75rem; padding:4px 12px; background:${view === 'map' ? 'var(--accent-blue)' : 'var(--bg-tertiary)'}; color:${view === 'map' ? '#fff' : 'var(--text-secondary)'}; border:none; cursor:pointer;">◆ Map</button>
+                    <button class="seg__btn ${view === 'timeline' ? 'seg__btn--on' : ''}" data-action="toggle-stage" data-stage="timeline" style="font-size:0.75rem; padding:4px 12px; background:${view === 'timeline' ? 'var(--accent-blue)' : 'var(--bg-tertiary)'}; color:${view === 'timeline' ? '#fff' : 'var(--text-secondary)'}; border:none; cursor:pointer;">💬 Timeline</button>
                 </div>
-            `;
-            return;
-        }
+                <span class="stage__status" style="font-size:0.75rem; color:var(--text-secondary);">${SwarmState.swarm_running ? '<span style="color:var(--accent-green);">●</span> Swarm optimal' : '<span style="color:var(--text-muted);">●</span> Swarm idle'} · ${n} agent${n === 1 ? '' : 's'}</span>
+            </div>
+            <div class="stage__body" id="stage-body" style="flex: 1; overflow: auto; position: relative;"></div>
+        </div>
+    `;
+    const body = document.getElementById('stage-body');
+    if (view === 'map') {
+        renderSwarmMap(body);
+    } else {
+        renderTimeline(body);
+    }
+}
 
-        const agentNode = nodeMap[agentId];
-        if (!agentNode) return;
-        const agent = agentNode.agent;
-
-        const listSims = [];
-        for (const other of SwarmState.agents) {
-            if (other.id !== agentId) {
-                const res = calculateAgentDistance(agent, other);
-                listSims.push({
-                    agent: other,
-                    distance: res.distance,
-                    goalSim: res.goalSim,
-                    fileSim: res.fileSim,
-                    toolSim: res.toolSim
+function renderTimeline(container) {
+    const agentId = UIState.selectedAgentId;
+    if (agentId) {
+        UIState.editingAgentId = agentId;
+        renderAgentChatTab(container);
+    } else {
+        let timelineItems = [];
+        for (const agent of SwarmState.agents) {
+            const thoughts = agent.thought_traces || [];
+            for (const th of thoughts) {
+                timelineItems.push({
+                    type: 'thought',
+                    timestamp: th.timestamp,
+                    agentId: agent.id,
+                    data: th
+                });
+            }
+            const chatMessages = agent.chat_messages || [];
+            for (const msg of chatMessages) {
+                timelineItems.push({
+                    type: 'chat',
+                    timestamp: msg.timestamp,
+                    agentId: agent.id,
+                    data: msg
                 });
             }
         }
-        listSims.sort((a, b) => a.distance - b.distance);
 
-        const statusColor = {
-            exploring: 'var(--accent-cyan)',
-            completed: 'var(--accent-green)',
-            dead: 'var(--accent-red)',
-            syncing: 'var(--accent-amber)',
-            pending_termination: 'var(--accent-red)',
-        }[agent.status] || 'var(--text-muted)';
+        timelineItems.sort((a, b) => a.timestamp - b.timestamp);
+        const recentItems = timelineItems.slice(-40);
 
-        let sidebarHtml = `
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-md);">
-                <h3 style="font-family:var(--font-mono); font-size:0.92rem; font-weight:600; color:var(--accent-cyan); margin:0;">Agent ${agent.id}</h3>
-                <span style="font-size: 0.62rem; font-weight: 600; text-transform: uppercase; padding: 1px 6px; border-radius: var(--radius-sm); background: ${statusColor}22; color: ${statusColor};">${agent.status || 'unknown'}</span>
-            </div>
-            
-            <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:var(--space-xs); font-weight:600;">ROLE:</div>
-            <div style="font-size:0.78rem; color:var(--text-primary); margin-bottom:var(--space-md);">${escapeHtml(agent.personality || agent.role || 'Generalist')}</div>
-            
-            <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:var(--space-xs); font-weight:600;">CURRENT GOAL:</div>
-            <div style="font-size:0.78rem; color:var(--text-primary); margin-bottom:var(--space-md); line-height:1.4;">${escapeHtml(agent.goal || '')}</div>
-            
-            <div style="display:flex; flex-direction:column; gap:var(--space-xs); margin-bottom:var(--space-xl);">
-                <button class="btn btn--primary btn--sm" data-action="view-workspace" data-agent-id="${agent.id}" style="justify-content:center; padding: var(--space-sm) 0;">📁 Browse Workspace</button>
-                <button class="btn btn--sm" data-action="view-trace" data-agent-id="${agent.id}" style="justify-content:center; padding: var(--space-sm) 0;">🔍 View Causal Trace</button>
-                <button class="btn btn--ghost btn--sm" data-action="edit-agent" data-agent-id="${agent.id}" style="justify-content:center; padding: var(--space-sm) 0;">✏️ Edit Goal/Role</button>
-            </div>
-            
-            <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:var(--space-sm); font-weight:600; text-transform:uppercase; border-top: 1px solid var(--border-secondary); padding-top: var(--space-md);">Task Similarity Metrics</div>
-        `;
-
-        if (listSims.length === 0) {
-            sidebarHtml += `<div style="font-size:0.7rem; color:var(--text-muted);">No other agents in the swarm.</div>`;
+        let timelineHtml = '<div class="swarm-timeline" id="swarm-timeline-scroll" style="display:flex; flex-direction:column; height:100%; overflow-y:auto; padding:var(--space-xl); background:var(--bg-secondary); gap: var(--space-md);">';
+        
+        if (recentItems.length === 0) {
+            timelineHtml += `
+                <div style="flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; color:var(--text-muted); min-height: 200px;">
+                    <div style="font-size: 2rem; margin-bottom: var(--space-sm);">💬</div>
+                    <div>No swarm activity yet. Run the swarm or select an agent to interact.</div>
+                </div>
+            `;
         } else {
-            sidebarHtml += `<div style="display:flex; flex-direction:column; gap:var(--space-sm);">`;
-            for (const sim of listSims) {
-                const levelColor = sim.distance < 0.5 ? 'var(--accent-amber)' : 'var(--text-muted)';
-                sidebarHtml += `
-                    <div style="background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:var(--radius-sm); padding:var(--space-sm);">
-                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-xs);">
-                            <span style="font-family:var(--font-mono); font-size:0.72rem; font-weight:600; color:var(--accent-cyan);">Agent ${sim.agent.id}</span>
-                            <span style="font-family:var(--font-mono); font-size:0.68rem; font-weight:600; color:${levelColor};">Dist: ${sim.distance.toFixed(3)}</span>
+            for (const item of recentItems) {
+                const timeStr = new Date(item.timestamp * 1000).toLocaleTimeString();
+                if (item.type === 'chat') {
+                    const msg = item.data;
+                    const isUser = msg.role === 'user';
+                    const roleClass = isUser ? 'chat-message--user' : 'chat-message--system';
+                    timelineHtml += `
+                        <div class="chat-message ${roleClass}" style="max-width: 80%; margin-bottom: var(--space-sm); align-self: ${isUser ? 'flex-end' : 'flex-start'};">
+                            <div class="chat-message__bubble" style="padding: var(--space-sm) var(--space-md); border-radius: var(--radius-md); font-size: 0.8rem; background: ${isUser ? 'var(--accent-blue-dim)' : 'var(--bg-tertiary)'}; border: 1px solid var(--border-primary);">
+                                <strong style="color:var(--accent-cyan);">Agent ${item.agentId}:</strong> ${escapeHtml(msg.content)}
+                            </div>
+                            <div class="chat-message__meta" style="font-size:0.65rem; color:var(--text-muted); margin-top:2px;">
+                                <span>${isUser ? 'You' : `Agent ${item.agentId}`}</span>
+                                <span>·</span>
+                                <span>${timeStr}</span>
+                            </div>
                         </div>
-                        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 4px; text-align:center; font-size:0.6rem; color:var(--text-muted);">
-                            <div>Goal: ${(sim.goalSim * 100).toFixed(0)}%</div>
-                            <div>Files: ${(sim.fileSim * 100).toFixed(0)}%</div>
-                            <div>Tools: ${(sim.toolSim * 100).toFixed(0)}%</div>
+                    `;
+                } else {
+                    const th = item.data;
+                    const iconMap = {
+                        evaluating: '🔍',
+                        decision: '🎯',
+                        executing: '🔄',
+                        completed: '✅',
+                        failed: '❌',
+                        spawn: '🚀',
+                        syncing: '⚡',
+                        resolved: '🤝'
+                    };
+                    const icon = iconMap[th.type] || '💭';
+                    timelineHtml += `
+                        <div class="thought-trace thought-trace--${th.type}" style="display:flex; gap:var(--space-md); padding:var(--space-sm) var(--space-md); border-radius:var(--radius-sm); border-left:3px solid var(--border-primary); background:var(--bg-tertiary); max-width: 80%; align-self: flex-start;">
+                            <div class="thought-trace__icon" style="font-size:1.1rem; padding-top:2px;">${icon}</div>
+                            <div class="thought-trace__body">
+                                <div class="thought-trace__content" style="font-size:0.8rem; line-height:1.45;"><strong style="color:var(--accent-cyan);">Agent ${item.agentId}:</strong> ${escapeHtml(th.content)}</div>
+                                <div class="thought-trace__time" style="font-size:0.65rem; color:var(--text-muted); margin-top:2px;">${timeStr}</div>
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+        }
+
+        // Interleave decision cards for pending_spawns and pending_blockers
+        let decisionsHtml = '';
+        if (SwarmState.pending_spawns.length > 0 || SwarmState.pending_blockers.length > 0) {
+            decisionsHtml += '<div style="margin-top: var(--space-lg); border-top: 1px solid var(--border-primary); padding-top: var(--space-md); display:flex; flex-direction:column; gap:var(--space-md);">';
+            decisionsHtml += '<div style="font-size:0.77rem; font-weight:600; color:var(--text-secondary); letter-spacing:0.04em;">PENDING OPERATIONS</div>';
+            for (const spawn of SwarmState.pending_spawns) {
+                decisionsHtml += `
+                    <div class="decision-card decision-card--spawn" style="margin-bottom: 0;">
+                        <div class="decision-card__type decision-card__type--spawn">SPAWN REQUEST (Agent ${escapeHtml(spawn.agent_id)})</div>
+                        <div class="decision-card__title">Agent ${escapeHtml(spawn.agent_id)}</div>
+                        <div class="decision-card__desc">
+                            <strong>Goal:</strong> ${escapeHtml(spawn.goal)}<br>
+                            <strong>Reason:</strong> ${escapeHtml(spawn.reason)}
+                        </div>
+                        <div class="decision-card__actions">
+                            <button class="btn btn--success btn--sm" data-action="approve-spawn" data-agent-id="${spawn.agent_id}">✓ Approve</button>
+                            <button class="btn btn--danger btn--sm" data-action="reject-spawn" data-agent-id="${spawn.agent_id}">✕ Reject</button>
                         </div>
                     </div>
                 `;
             }
-            sidebarHtml += `</div>`;
+            for (const blocker of SwarmState.pending_blockers) {
+                const blk = blocker.blocker || {};
+                decisionsHtml += `
+                    <div class="decision-card decision-card--blocker" style="margin-bottom: 0;">
+                        <div class="decision-card__type decision-card__type--blocker">BLOCKER (Agent ${escapeHtml(blocker.agent_id)})</div>
+                        <div class="decision-card__title">Agent ${escapeHtml(blocker.agent_id)}</div>
+                        <div class="decision-card__desc">
+                            <strong>File:</strong> ${escapeHtml(blk.file_path || 'N/A')}<br>
+                            <strong>Tool:</strong> ${escapeHtml(blk.tool_used || 'N/A')}<br>
+                            <strong>Error:</strong> ${escapeHtml(blk.error_message || 'Unknown error')}
+                        </div>
+                        <div class="decision-card__actions">
+                            <button class="btn btn--success btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="1">🔧 Workaround</button>
+                            <button class="btn btn--warning btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="2">⏭ Bypass</button>
+                            <button class="btn btn--danger btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="3">💀 Kill</button>
+                        </div>
+                    </div>
+                `;
+            }
+            decisionsHtml += '</div>';
         }
 
-        sidebarContent.innerHTML = sidebarHtml;
+        timelineHtml += decisionsHtml;
+        timelineHtml += `
+            <div style="padding: var(--space-md); border-top: 1px solid var(--border-primary); margin-top: var(--space-lg); font-size:0.72rem; color:var(--text-muted); text-align:center;">
+                💡 Send directives via command bar (e.g. <code>@001 add test comments</code>) or select an agent in sidebar to scope the chat.
+            </div>
+        `;
+        timelineHtml += '</div>';
+
+        container.innerHTML = timelineHtml;
+
+        // Auto-scroll timeline to bottom
+        const scrollContainer = document.getElementById('swarm-timeline-scroll');
+        if (scrollContainer) {
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        }
     }
 }
 
@@ -1591,7 +1618,7 @@ function renderTraceTab(container) {
 async function loadTrace(agentId) {
     UIState.selectedTraceAgent = agentId;
     UIState.traceData = await apiGet(`/api/trace/${agentId}`);
-    renderViewportContent();
+    render();
 }
 
 function renderMemoryTab(container) {
@@ -1652,7 +1679,7 @@ function renderMemoryTab(container) {
 
 async function loadMemory() {
     UIState.memoryData = await apiGet('/api/memory');
-    renderViewportContent();
+    render();
 }
 
 function renderLogsTab(container) {
@@ -1699,6 +1726,365 @@ function renderLogTail() {
     }
     tailEl.innerHTML = html;
     tailEl.scrollTop = tailEl.scrollHeight;
+}
+
+
+// ---------------------------------------------------------------------------
+// Agent Inspector Slide Panel
+// ---------------------------------------------------------------------------
+function renderInspector() {
+    const inspectorEl = document.getElementById('inspector');
+    const backdropEl = document.getElementById('slide-backdrop');
+    if (!inspectorEl) return;
+
+    if (!UIState.inspectorOpen || !UIState.selectedAgentId) {
+        inspectorEl.classList.remove('slide-panel--active');
+        if (backdropEl) backdropEl.classList.remove('modal-overlay--active');
+        return;
+    }
+
+    const agentId = UIState.selectedAgentId;
+    const agent = SwarmState.agents.find(a => a.id === agentId);
+    if (!agent) {
+        inspectorEl.classList.remove('slide-panel--active');
+        if (backdropEl) backdropEl.classList.remove('modal-overlay--active');
+        return;
+    }
+
+    inspectorEl.classList.add('slide-panel--active');
+    if (backdropEl) {
+        backdropEl.classList.add('modal-overlay--active');
+    }
+
+    // Update active tab styles
+    inspectorEl.querySelectorAll('.inspector-tab').forEach(btn => {
+        const active = btn.dataset.tab === UIState.inspectorTab;
+        btn.classList.toggle('inspector-tab--active', active);
+    });
+
+    const titleEl = document.getElementById('inspector-title');
+    if (titleEl) {
+        titleEl.textContent = `Agent ${agentId} Inspector`;
+    }
+
+    const bodyEl = document.getElementById('inspector-body');
+    if (!bodyEl) return;
+
+    switch (UIState.inspectorTab) {
+        case 'overview':
+            renderInspectorOverview(agent, bodyEl);
+            break;
+        case 'budget':
+            renderInspectorBudget(agent, bodyEl);
+            break;
+        case 'trace':
+            renderInspectorTrace(agent, bodyEl);
+            break;
+        case 'memory':
+            renderInspectorMemory(agent, bodyEl);
+            break;
+    }
+}
+
+function renderInspectorOverview(agent, bodyEl) {
+    renderClusterSidebar(agent.id, bodyEl);
+}
+
+function renderInspectorBudget(agent, bodyEl) {
+    const nodeBudget = agent.token_budget || SwarmState.session_budget || 20000;
+    const subtreeBudget = agent.subtree_token_budget || null;
+    const usedTokens = agent.output_tokens || 0;
+    const budgetPctNode = Math.min(Math.round((usedTokens / Math.max(nodeBudget, 1)) * 100), 100);
+    const budgetColorNode = budgetPctNode > 90 ? 'red' : budgetPctNode > 60 ? 'amber' : 'green';
+
+    const allAgents = SwarmState.agents;
+    const hasChildren = allAgents.some(a => a.parent_id === agent.id && !['completed', 'dead'].includes(a.status));
+
+    let budgetHtml = `
+        <div class="workspace-section" style="padding: 0; border: none; background: none;">
+            <div class="workspace-section__title" style="margin-bottom: var(--space-md); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary);">🪙 Token Budget Cap</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm); margin-bottom: var(--space-md);">
+                <div>
+                    <label class="form-label" style="font-size: 0.65rem;">Node Budget</label>
+                    <input type="number" class="form-input form-input--compact" id="inspector-node-budget" value="${nodeBudget}" min="100" step="100">
+                </div>
+                <div>
+                    <label class="form-label" style="font-size: 0.65rem;">Subtree Budget</label>
+                    <input type="number" class="form-input form-input--compact" id="inspector-subtree-budget" value="${subtreeBudget || ''}" placeholder="Inherit global" min="100" step="100">
+                </div>
+            </div>
+            <div class="budget-tree__bar" style="height: 6px; border-radius: 3px; background: var(--bg-tertiary); overflow: hidden;">
+                <div class="budget-tree__bar-fill budget-tree__bar-fill--${budgetColorNode}" style="width: ${budgetPctNode}%"></div>
+            </div>
+            <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: var(--space-xs); display: flex; justify-content: space-between; margin-bottom: var(--space-md);">
+                <span>Used: ${usedTokens.toLocaleString()} / ${nodeBudget.toLocaleString()}</span>
+                <span>${budgetPctNode}%</span>
+            </div>
+            <button class="btn btn--primary btn--sm" id="inspector-save-budget-btn" style="width: 100%; justify-content: center; margin-bottom: var(--space-lg);">💾 Save Budget Cap</button>
+    `;
+
+    if (hasChildren) {
+        budgetHtml += `
+            <div style="margin-top: var(--space-md); border-top: 1px solid var(--border-secondary); padding-top: var(--space-sm);">
+                <div style="font-size: 0.68rem; font-weight: 600; color: var(--text-secondary); margin-bottom: var(--space-xs);">Redistribute Budget</div>
+                <div style="display: flex; gap: var(--space-xs);">
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agent.id}" data-strategy="equal" title="Split equally among children">⚖️ Equal</button>
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agent.id}" data-strategy="weighted" title="Proportional to progress">📊 Weighted</button>
+                    <button class="btn btn--sm btn--ghost" data-action="redistribute-budget" data-parent-id="${agent.id}" data-strategy="priority" title="Based on priority weights">🎯 Priority</button>
+                </div>
+            </div>
+        `;
+    }
+    budgetHtml += `</div>`;
+    
+    bodyEl.innerHTML = budgetHtml;
+    
+    const saveBtn = document.getElementById('inspector-save-budget-btn');
+    if (saveBtn) {
+        saveBtn.onclick = async () => {
+            const nodeBudgetInput = document.getElementById('inspector-node-budget');
+            const subtreeBudgetInput = document.getElementById('inspector-subtree-budget');
+            
+            const updates = {
+                personality: agent.personality || agent.role || 'Generalist',
+                goal: agent.goal || ''
+            };
+            
+            if (nodeBudgetInput && nodeBudgetInput.value) {
+                updates.token_budget = parseInt(nodeBudgetInput.value);
+            }
+            if (subtreeBudgetInput && subtreeBudgetInput.value) {
+                updates.subtree_token_budget = parseInt(subtreeBudgetInput.value);
+            }
+            
+            const result = await apiPost(`/api/agents/${agent.id}/edit`, updates);
+            if (result.success) {
+                showToast(`Agent ${agent.id} budget updated`, 'success');
+                agent.token_budget = updates.token_budget;
+                agent.subtree_token_budget = updates.subtree_token_budget;
+                render();
+            } else {
+                showToast(result.message || 'Failed to update budget', 'error');
+            }
+        };
+    }
+}
+
+function renderInspectorTrace(agent, bodyEl) {
+    if (UIState.selectedTraceAgent !== agent.id) {
+        UIState.selectedTraceAgent = agent.id;
+        UIState.traceData = null;
+    }
+    renderTraceTab(bodyEl);
+}
+
+function renderInspectorMemory(agent, bodyEl) {
+    renderMemoryTab(bodyEl);
+}
+
+
+// ---------------------------------------------------------------------------
+// Bottom Drawer (Activity & Logs)
+// ---------------------------------------------------------------------------
+function renderDrawer() {
+    const drawerEl = document.getElementById('drawer');
+    if (!drawerEl) return;
+
+    if (!UIState.drawerOpen) {
+        drawerEl.classList.remove('bottom-drawer--active');
+        return;
+    }
+
+    drawerEl.classList.add('bottom-drawer--active');
+
+    // Update active tab buttons in drawer header
+    drawerEl.querySelectorAll('.bottom-drawer__tab').forEach(btn => {
+        const active = btn.dataset.tab === UIState.drawerTab;
+        btn.classList.toggle('bottom-drawer__tab--active', active);
+    });
+
+    const bodyEl = document.getElementById('drawer-body');
+    if (!bodyEl) return;
+
+    if (UIState.drawerTab === 'activity') {
+        renderDrawerActivity(bodyEl);
+    } else {
+        renderDrawerLogs(bodyEl);
+    }
+}
+
+function renderDrawerActivity(container) {
+    const budgetAlert = SwarmState.budget_alert || {};
+    const budgetExceeded = budgetAlert.budget_exceeded || false;
+    const maxTokens = getMaxLeafTokens();
+    const budgetCap = SwarmState.session_budget || 20000;
+
+    let html = '';
+
+    if (budgetExceeded) {
+        html += `
+            <div class="decision-card decision-card--blocker" style="margin-bottom: var(--space-md);">
+                <div class="decision-card__type decision-card__type--blocker">BUDGET EXCEEDED</div>
+                <div class="decision-card__title">Output tokens cap reached!</div>
+                <div class="decision-card__desc" style="margin-bottom: 0;">
+                    Leaf agent tokens: <strong>${maxTokens.toLocaleString()}</strong> / Cap: <strong>${budgetCap.toLocaleString()}</strong>
+                    <br><br>
+                    <strong>Leaf Pruning Candidates:</strong>
+                    <div style="margin-top: var(--space-sm); display: flex; flex-direction: column; gap: var(--space-sm);">
+                        ${(budgetAlert.candidates || []).map((c) => `
+                            <div style="border-top: 1px solid var(--border-secondary); padding-top: var(--space-xs);">
+                                <div style="font-family: var(--font-mono); font-weight: 600; color: var(--accent-cyan); font-size: 0.72rem; margin-bottom: 2px;">Agent ${escapeHtml(c.id)}</div>
+                                <div style="font-size: 0.68rem; color: var(--text-secondary); margin-bottom: var(--space-xs); line-height: 1.4;">${escapeHtml(c.reason || 'No explanation')}</div>
+                                <button class="btn btn--danger btn--sm" data-action="prune-agent" data-agent-id="${c.id}">🔥 Prune Agent ${c.id}</button>
+                            </div>
+                        `).join('')}
+                        ${(budgetAlert.candidates || []).length === 0 ? '<div style="font-size: 0.68rem; color: var(--text-muted);">No candidates to prune.</div>' : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Pending Spawn Decisions
+    if (SwarmState.pending_spawns.length > 0) {
+        html += '<div class="section-label" style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); margin-bottom: var(--space-sm);">⚡ Pending Spawns</div>';
+        html += '<div style="display: flex; flex-wrap: wrap; gap: var(--space-md); margin-bottom: var(--space-md);">';
+        for (const spawn of SwarmState.pending_spawns) {
+            html += `
+                <div class="decision-card decision-card--spawn" style="flex: 1; min-width: 280px; max-width: 400px; margin: 0;">
+                    <div class="decision-card__type decision-card__type--spawn">SPAWN REQUEST</div>
+                    <div class="decision-card__title">Agent ${escapeHtml(spawn.agent_id)}</div>
+                    <div class="decision-card__desc">
+                        <strong>Goal:</strong> ${escapeHtml(spawn.goal)}<br>
+                        <strong>Reason:</strong> ${escapeHtml(spawn.reason)}
+                    </div>
+                    <div class="decision-card__actions">
+                        <button class="btn btn--success btn--sm" data-action="approve-spawn" data-agent-id="${spawn.agent_id}">✓ Approve</button>
+                        <button class="btn btn--danger btn--sm" data-action="reject-spawn" data-agent-id="${spawn.agent_id}">✕ Reject</button>
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    // Pending Blockers
+    if (SwarmState.pending_blockers.length > 0) {
+        html += '<div class="section-label" style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); margin-bottom: var(--space-sm);">🚧 Blockers</div>';
+        html += '<div style="display: flex; flex-wrap: wrap; gap: var(--space-md); margin-bottom: var(--space-md);">';
+        for (const blocker of SwarmState.pending_blockers) {
+            const blk = blocker.blocker || {};
+            html += `
+                <div class="decision-card decision-card--blocker" style="flex: 1; min-width: 280px; max-width: 400px; margin: 0;">
+                    <div class="decision-card__type decision-card__type--blocker">BLOCKER</div>
+                    <div class="decision-card__title">Agent ${escapeHtml(blocker.agent_id)}</div>
+                    <div class="decision-card__desc">
+                        <strong>File:</strong> ${escapeHtml(blk.file_path || 'N/A')}<br>
+                        <strong>Tool:</strong> ${escapeHtml(blk.tool_used || 'N/A')}<br>
+                        <strong>Error:</strong> ${escapeHtml(blk.error_message || 'Unknown error')}
+                    </div>
+                    <div class="decision-card__actions">
+                        <button class="btn btn--success btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="1">🔧 Workaround</button>
+                        <button class="btn btn--warning btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="2">⏭ Bypass</button>
+                        <button class="btn btn--danger btn--sm" data-action="resolve-blocker" data-agent-id="${blocker.agent_id}" data-choice="3">💀 Kill</button>
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    // Collisions
+    if (SwarmState.collisions.length > 0) {
+        html += '<div class="section-label" style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); margin-bottom: var(--space-sm);">⚡ Collisions</div>';
+        html += '<div style="display: flex; flex-direction: column; gap: var(--space-xs); margin-bottom: var(--space-md);">';
+        for (const col of SwarmState.collisions) {
+            html += `
+                <div class="collision-entry" style="margin: 0; background: var(--bg-tertiary); border: 1px solid var(--border-primary); padding: var(--space-sm); border-radius: var(--radius-sm);">
+                    <div class="collision-entry__agents" style="font-weight: 600; font-size: 0.75rem;">
+                        Agent ${escapeHtml(col.agent_a || '?')} ↔ Agent ${escapeHtml(col.agent_b || '?')}
+                    </div>
+                    <div class="collision-entry__detail" style="font-size: 0.68rem; color: var(--text-secondary);">
+                        Distance: ${(col.distance || 0).toFixed(3)} | Status: ${escapeHtml(col.status || 'active')}
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    // Tombstones
+    if (SwarmState.tombstones.length > 0) {
+        html += '<div class="section-label" style="font-size: 0.68rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); margin-bottom: var(--space-sm);">💀 Tombstones</div>';
+        html += '<div style="display: flex; flex-direction: column; gap: var(--space-sm); margin-bottom: var(--space-md);">';
+        for (const tomb of SwarmState.tombstones) {
+            if (tomb.file_path) {
+                html += `
+                    <div class="tombstone-entry" style="margin: 0; background: var(--bg-tertiary); border: 1px solid var(--border-primary); padding: var(--space-sm); border-radius: var(--radius-sm);">
+                        <div class="tombstone-entry__agent" style="font-weight: 600; color: var(--accent-orange); font-size: 0.75rem;">⚡ BLOCKER FAILURE</div>
+                        <div class="tombstone-entry__reason" style="line-height: 1.45; font-size: 0.7rem;">
+                            <strong>File:</strong> ${escapeHtml(tomb.file_path)}<br>
+                            <strong>Tool:</strong> ${escapeHtml(tomb.tool_used)}<br>
+                            <strong>Error:</strong> <span style="color: var(--accent-red);">${escapeHtml(tomb.error_message)}</span><br>
+                            <strong>Fix:</strong> <span style="color: var(--accent-green);">${escapeHtml(tomb.fix_action)}</span>
+                        </div>
+                    </div>
+                `;
+            } else {
+                html += `
+                    <div class="tombstone-entry" style="margin: 0; background: var(--bg-tertiary); border: 1px solid var(--border-primary); padding: var(--space-sm); border-radius: var(--radius-sm);">
+                        <div class="tombstone-entry__agent" style="font-weight: 600; color: var(--text-bright); font-size: 0.75rem;">💀 Agent ${escapeHtml(tomb.agent_id || '?')}</div>
+                        <div class="tombstone-entry__reason" style="line-height: 1.45; font-size: 0.7rem;">
+                            <strong>Status:</strong> ${tomb.is_pruned ? 'Pruned' : 'Terminated'}<br>
+                            <strong>Goal:</strong> ${escapeHtml(tomb.goal || '')}<br>
+                            <strong>Reason:</strong> ${escapeHtml(tomb.reason || 'No reason')}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+        html += '</div>';
+    }
+
+    if (!html.includes('decision-card') && !html.includes('collision-entry') && !html.includes('tombstone-entry') && !budgetExceeded) {
+        html += `
+            <div style="padding: var(--space-lg); text-align: center; color: var(--text-muted); font-size: 0.78rem;">
+                💤 No active alerts or decisions pending.
+            </div>
+        `;
+    }
+
+    container.innerHTML = html;
+}
+
+function renderDrawerLogs(container) {
+    const logs = SwarmState.logs || [];
+    if (logs.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state__icon">📋</div>
+                <div class="empty-state__title">No Logs Yet</div>
+                <div class="empty-state__desc">Logs will appear here once the swarm is running.</div>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '<div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6; background: var(--bg-tertiary); border: 1px solid var(--border-primary); border-radius: var(--radius-sm); padding: var(--space-md); height: 100%; overflow-y: auto;" id="drawer-logs-box">';
+    for (const line of logs) {
+        const cls = line.includes('[ERROR]') ? 'color: var(--accent-red)' :
+                    line.includes('[WARN]') ? 'color: var(--accent-amber)' :
+                    'color: var(--text-secondary)';
+        html += `<div style="${cls}; white-space: pre-wrap; margin-bottom: var(--space-xs);">${escapeHtml(line)}</div>`;
+    }
+    html += '</div>';
+    container.innerHTML = html;
+    
+    // Auto scroll to bottom
+    const box = document.getElementById('drawer-logs-box');
+    if (box) {
+        box.scrollTop = box.scrollHeight;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1777,36 +2163,42 @@ async function saveAgentEdits() {
 }
 
 // ---------------------------------------------------------------------------
-// Launch Modal
+// Launch Modal / Unified Init Overlay Management
 // ---------------------------------------------------------------------------
 function openLaunchModal() {
-    document.getElementById('launch-modal').classList.add('modal-overlay--active');
-    document.getElementById('launch-goal').value = '';
-    document.getElementById('launch-budget').value = SwarmState.session_budget || 20000;
+    UIState.initModalOpen = true;
     UIState.designerAgents = [{ role: 'Generalist', goal: '' }];
-    renderDesignerAgents();
-    document.getElementById('launch-goal').focus();
+    const goalInput = document.getElementById('init-goal');
+    if (goalInput) {
+        goalInput.value = '';
+    }
+    render();
+    if (goalInput) {
+        goalInput.focus();
+    }
 }
 
 function closeLaunchModal() {
-    document.getElementById('launch-modal').classList.remove('modal-overlay--active');
+    UIState.initModalOpen = false;
+    render();
 }
 
 function renderDesignerAgents() {
     const container = document.getElementById('designer-agents');
+    if (!container) return;
     let html = '';
     for (let i = 0; i < UIState.designerAgents.length; i++) {
         const agent = UIState.designerAgents[i];
         html += `
-            <div class="agent-designer-item">
-                <span class="agent-designer-item__number">#${i + 1}</span>
-                <div class="agent-designer-item__fields">
+            <div class="agent-designer-item" style="display: flex; gap: var(--space-sm); align-items: center; background: var(--bg-tertiary); border: 1px solid var(--border-primary); padding: var(--space-sm); border-radius: var(--radius-sm); margin-bottom: var(--space-xs);">
+                <span class="agent-designer-item__number" style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);">#${i + 1}</span>
+                <div class="agent-designer-item__fields" style="flex: 1; display: flex; flex-direction: column; gap: var(--space-xs);">
                     <input type="text" placeholder="Role (e.g. Backend Engineer)" value="${escapeAttr(agent.role)}"
-                           data-action="update-designer-role" data-index="${i}">
+                           data-action="update-designer-role" data-index="${i}" class="form-input" style="height: 28px; padding: 2px var(--space-sm); font-size: 0.75rem;">
                     <input type="text" placeholder="Goal (optional, inherits macro goal)" value="${escapeAttr(agent.goal)}"
-                           data-action="update-designer-goal" data-index="${i}">
+                           data-action="update-designer-goal" data-index="${i}" class="form-input" style="height: 28px; padding: 2px var(--space-sm); font-size: 0.75rem;">
                 </div>
-                <button class="icon-btn" data-action="remove-designer-agent" data-index="${i}" title="Remove" style="flex-shrink: 0;">✕</button>
+                <button type="button" class="icon-btn" data-action="remove-designer-agent" data-index="${i}" title="Remove" style="flex-shrink: 0; padding: 4px;">✕</button>
             </div>
         `;
     }
@@ -1825,8 +2217,8 @@ function removeDesignerAgent(index) {
 }
 
 async function launchSwarm() {
-    const goal = document.getElementById('launch-goal').value.trim();
-    const budget = parseInt(document.getElementById('launch-budget').value) || 20000;
+    const goal = document.getElementById('init-goal').value.trim();
+    const budget = parseInt(document.getElementById('init-budget').value) || 20000;
 
     if (!goal) {
         showToast('Please enter a macro goal', 'error');
@@ -1973,21 +2365,80 @@ document.addEventListener('click', (e) => {
     const action = target.dataset.action;
 
     switch (action) {
+        case 'open-inspector':
+            e.stopPropagation();
+            UIState.inspectorOpen = true;
+            UIState.selectedAgentId = target.dataset.agentId;
+            if (target.dataset.tab) {
+                UIState.inspectorTab = target.dataset.tab;
+            }
+            render();
+            break;
+        case 'close-inspector':
+            UIState.inspectorOpen = false;
+            render();
+            break;
+        case 'switch-inspector-tab':
+            UIState.inspectorTab = target.dataset.tab;
+            render();
+            break;
+        case 'close-slide-panels':
+            closeEditPanel();
+            UIState.inspectorOpen = false;
+            render();
+            break;
+        case 'open-drawer':
+            UIState.drawerOpen = true;
+            if (target.dataset.tab) {
+                UIState.drawerTab = target.dataset.tab;
+            }
+            render();
+            break;
+        case 'close-drawer':
+            UIState.drawerOpen = false;
+            render();
+            break;
+        case 'switch-drawer-tab':
+            UIState.drawerTab = target.dataset.tab;
+            render();
+            break;
         case 'switch-right-tab':
             UIState.rightPanelTab = target.dataset.tab;
             render();
             break;
+        case 'toggle-stage':
+            UIState.stageView = target.dataset.stage;
+            render();
+            break;
         case 'init-launch':
+        case 'launch-swarm':
             initLaunch();
             break;
         case 'open-launch':
             openLaunchModal();
             break;
         case 'close-launch':
-            closeLaunchModal();
+        case 'close-init':
+            UIState.initModalOpen = false;
+            render();
             break;
-        case 'launch-swarm':
-            launchSwarm();
+        case 'set-budget-preset':
+            e.stopPropagation();
+            {
+                const btnGroup = target.parentNode;
+                btnGroup.querySelectorAll('.seg__btn').forEach(btn => {
+                    btn.classList.remove('seg__btn--on');
+                    btn.style.background = 'var(--bg-tertiary)';
+                    btn.style.color = 'var(--text-secondary)';
+                });
+                target.classList.add('seg__btn--on');
+                target.style.background = 'var(--accent-blue)';
+                target.style.color = '#fff';
+                const exactInput = document.getElementById('init-budget');
+                if (exactInput) {
+                    exactInput.value = target.dataset.value;
+                }
+            }
             break;
         case 'add-designer-agent':
             addDesignerAgent();
@@ -2159,7 +2610,7 @@ document.getElementById('command-input').addEventListener('keydown', (e) => {
 
         // If not running, treat as a launch command
         if (!SwarmState.swarm_running && !input.startsWith('/')) {
-            document.getElementById('launch-goal').value = input;
+            document.getElementById('init-goal').value = input;
             openLaunchModal();
             return;
         }
@@ -2243,7 +2694,7 @@ document.getElementById('command-input').addEventListener('keydown', (e) => {
             render();
         } else {
             // Treat as a new goal / launch
-            document.getElementById('launch-goal').value = input;
+            document.getElementById('init-goal').value = input;
             openLaunchModal();
         }
     }
@@ -2279,17 +2730,23 @@ async function initLaunch() {
         return;
     }
 
+    // Collect designer agents
+    const agents = UIState.designerAgents.map((a, i) => ({
+        agent_id: `${i + 1}`.padStart(3, '0'),
+        personality: a.role || 'Generalist',
+        role: a.role || 'Generalist',
+        goal: a.goal || goal,
+    }));
+
     showToast('Configuring LLM provider...', 'info');
     await apiPost('/api/config', { llm_provider: provider });
 
     showToast('Initializing swarm task...', 'info');
-    const result = await apiPost('/api/run', { goal, agents: [], budget });
+    const result = await apiPost('/api/run', { goal, agents, budget });
     if (result.success) {
         showToast(result.message, 'success');
-        const overlay = document.getElementById('init-overlay');
-        if (overlay) {
-            overlay.style.display = 'none';
-        }
+        UIState.initModalOpen = false;
+        render();
     } else {
         showToast(result.message || 'Failed to initialize swarm', 'error');
     }

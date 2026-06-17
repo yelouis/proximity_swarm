@@ -2150,3 +2150,190 @@ a:hover { text-decoration: underline; }
 /* The horizontal tab strip is retired — navigation lives in the activity bar */
 .viewport__tabs { display: none; }
 
+/* --------------- Stage & Timeline --------------- */
+.stage {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.stage__toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-secondary);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+}
+.seg {
+    display: inline-flex;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+.seg__btn {
+    font-size: 0.75rem;
+    padding: 4px 12px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: none;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+.seg__btn--on {
+    background: var(--accent-blue) !important;
+    color: #fff !important;
+}
+.stage__body {
+    flex: 1;
+    overflow: auto;
+    position: relative;
+}
+.cluster-edge {
+    stroke: var(--border-primary);
+}
+.map-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-xl);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-secondary);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+/* --------------- Editor Tabs --------------- */
+.editor-tab {
+    padding: var(--space-xs) var(--space-md);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: none;
+    border-right: 1px solid var(--border-secondary);
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-family: var(--font-sans);
+    transition: background var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+}
+.editor-tab:hover {
+    background: var(--bg-hover);
+    color: var(--text-bright);
+}
+.editor-tab--active {
+    background: var(--bg-primary) !important;
+    color: var(--text-bright) !important;
+    border-top: 2px solid var(--accent-blue) !important;
+    padding-top: calc(var(--space-xs) - 2px) !important;
+}
+
+/* --------------- Inspector Slide Panel --------------- */
+#inspector {
+    z-index: 1002; /* ensure it stays above details slide panel if any */
+}
+.inspector-tabs-container {
+    display: flex;
+    border-bottom: 1px solid var(--border-secondary);
+    background: var(--bg-tertiary);
+    flex-shrink: 0;
+}
+.inspector-tabs {
+    display: flex;
+    overflow-x: auto;
+    width: 100%;
+}
+.inspector-tab {
+    padding: var(--space-sm) var(--space-md);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+}
+.inspector-tab:hover {
+    color: var(--text-bright);
+    background: var(--bg-hover);
+}
+.inspector-tab--active {
+    color: var(--text-bright) !important;
+    border-bottom: 2px solid var(--accent-blue) !important;
+    font-weight: 600;
+}
+
+/* --------------- Bottom Drawer --------------- */
+.bottom-drawer {
+    position: absolute;
+    bottom: 58px;
+    left: 0;
+    right: 0;
+    height: 280px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-primary);
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 99; /* just below top-bar dropdowns but above editor and panels */
+    display: flex;
+    flex-direction: column;
+    transform: translateY(100%);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 0.25s ease, opacity 0.25s ease;
+}
+.bottom-drawer--active {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+.bottom-drawer__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--space-lg);
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-secondary);
+    height: 32px;
+    flex-shrink: 0;
+}
+.bottom-drawer__tabs {
+    display: flex;
+    gap: var(--space-xs);
+    height: 100%;
+}
+.bottom-drawer__tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-family: var(--font-sans);
+    padding: 0 var(--space-md);
+    cursor: pointer;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    transition: all var(--transition-fast);
+}
+.bottom-drawer__tab:hover {
+    color: var(--text-bright);
+    background: var(--bg-hover);
+}
+.bottom-drawer__tab--active {
+    color: var(--text-bright) !important;
+    border-bottom: 2px solid var(--accent-blue) !important;
+    font-weight: 600;
+}
+.bottom-drawer__body {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-md) var(--space-lg);
+    min-height: 0;
+}
+
+
+

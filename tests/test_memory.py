@@ -16,13 +16,23 @@ from agent_runner import AgentRunner
 class TestMemoryStore(unittest.TestCase):
     def setUp(self):
         # Redirect DB_DIR to a temporary folder during tests
+        self.old_db_dir = memory_store.DB_DIR
+        self.old_db_path = memory_store.DB_PATH
         self.test_dir = os.path.join(os.path.dirname(__file__), "tmp_state_memory")
         os.makedirs(self.test_dir, exist_ok=True)
         memory_store.DB_DIR = self.test_dir
-        memory_store.DB_PATH = os.path.join(self.test_dir, "test_memory.db")
+        db_path = os.path.join(self.test_dir, "test_memory.db")
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+        memory_store.DB_PATH = db_path
         memory_store.init_db()
 
     def tearDown(self):
+        memory_store.DB_DIR = self.old_db_dir
+        memory_store.DB_PATH = self.old_db_path
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 
@@ -146,13 +156,23 @@ class TestMemoryStore(unittest.TestCase):
 
 class TestAgentRunnerMemoryHooks(unittest.TestCase):
     def setUp(self):
+        self.old_db_dir = memory_store.DB_DIR
+        self.old_db_path = memory_store.DB_PATH
         self.test_dir = os.path.join(os.path.dirname(__file__), "tmp_state_memory_runner")
         os.makedirs(self.test_dir, exist_ok=True)
         memory_store.DB_DIR = self.test_dir
-        memory_store.DB_PATH = os.path.join(self.test_dir, "test_memory.db")
+        db_path = os.path.join(self.test_dir, "test_memory.db")
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+        memory_store.DB_PATH = db_path
         memory_store.init_db()
 
     def tearDown(self):
+        memory_store.DB_DIR = self.old_db_dir
+        memory_store.DB_PATH = self.old_db_path
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 

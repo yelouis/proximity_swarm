@@ -49,9 +49,6 @@
         <nav class="activity-bar" id="activity-bar">
             <button class="activity-bar__item" data-action="switch-tab" data-tab="overview" title="Overview">🗂️</button>
             <button class="activity-bar__item activity-bar__item--active" data-action="switch-tab" data-tab="clusters" title="Swarm map">🗺️</button>
-            <button class="activity-bar__item" data-action="switch-tab" data-tab="workspace" title="Workspace / editor">📁</button>
-            <button class="activity-bar__item" data-action="switch-tab" data-tab="trace" title="Causal trace">🔍</button>
-            <button class="activity-bar__item" data-action="switch-tab" data-tab="memory" title="Memory">🧠</button>
             <button class="activity-bar__item" data-action="switch-tab" data-tab="logs" title="Logs">📜</button>
             <span class="activity-bar__spacer"></span>
         </nav>
@@ -81,31 +78,54 @@
             
             <!-- Central Initialization Overlay -->
             <div class="init-overlay" id="init-overlay" style="display: none;">
-                <div class="init-card">
-                    <div class="init-card__header">
+                <div class="init-card" style="width: 580px; max-width: 90%; max-height: 90vh; overflow-y: auto;">
+                    <div class="init-card__header" style="position: relative;">
                         <span class="init-card__title">Initialize Swarm Task</span>
                         <span class="init-card__subtitle">Configure and launch your AI swarm agents for the project.</span>
+                        <button type="button" class="icon-btn" data-action="close-init" style="position: absolute; top: 0; right: 0; display: none;" id="init-close-btn">✕</button>
                     </div>
-                    <div class="init-card__body">
-                        <div class="form-group">
+                    <div class="init-card__body" style="display: flex; flex-direction: column; gap: var(--space-md);">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label" for="init-goal">Macro Goal / Task Prompt</label>
                             <textarea class="form-input init-prompt-input" id="init-goal" placeholder="Enter a prompt to initialize your swarm... (e.g., Build a microservice for user authentication using FastAPI)"></textarea>
                         </div>
-                        <div class="init-settings-row">
-                            <div class="form-group">
+                        <div class="init-settings-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+                            <div class="form-group" style="margin-bottom: 0;">
                                 <label class="form-label" for="init-provider">LLM Provider</label>
                                 <select class="form-input" id="init-provider">
                                     <option value="ollama">Ollama</option>
                                     <option value="gemini">Gemini</option>
                                 </select>
                             </div>
-                            <div class="form-group">
-                                <label class="form-label" for="init-budget">Compute Budget</label>
-                                <input type="number" class="form-input" id="init-budget" value="20000" min="100" step="100">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label class="form-label">Compute Budget</label>
+                                <div class="seg" style="display: flex; width: 100%; border-radius: var(--radius-sm); border: 1px solid var(--border-primary); overflow: hidden; height: 32px;">
+                                    <button class="seg__btn" type="button" data-action="set-budget-preset" data-preset="small" data-value="5000" style="flex: 1; text-align: center; font-size: 0.7rem; padding: 0;">Small (5k)</button>
+                                    <button class="seg__btn seg__btn--on" type="button" data-action="set-budget-preset" data-preset="medium" data-value="20000" style="flex: 1; text-align: center; font-size: 0.7rem; padding: 0;">Medium (20k)</button>
+                                    <button class="seg__btn" type="button" data-action="set-budget-preset" data-preset="large" data-value="50000" style="flex: 1; text-align: center; font-size: 0.7rem; padding: 0;">Large (50k)</button>
+                                </div>
+                                <details style="margin-top: var(--space-xs); font-size: 0.72rem; color: var(--text-secondary);">
+                                    <summary style="cursor: pointer; user-select: none; color: var(--accent-cyan);">Advanced ▸ exact tokens</summary>
+                                    <div style="margin-top: var(--space-xs);">
+                                        <input type="number" class="form-input" id="init-budget" value="20000" min="100" step="100" style="height: 28px; font-size: 0.75rem;">
+                                    </div>
+                                </details>
                             </div>
                         </div>
+                        <details style="margin-top: var(--space-sm); border-top: 1px solid var(--border-secondary); padding-top: var(--space-md);">
+                            <summary style="cursor: pointer; font-size: 0.82rem; font-weight: 600; color: var(--text-bright); user-select: none; color: var(--accent-cyan);">Configure custom agents (optional)</summary>
+                            <div style="margin-top: var(--space-sm);">
+                                <div class="agent-designer-list" id="designer-agents" style="display: flex; flex-direction: column; gap: var(--space-sm);">
+                                    <!-- Dynamic agent rows -->
+                                </div>
+                                <button type="button" class="btn btn--ghost" style="margin-top: var(--space-sm); width: 100%; justify-content: center; font-size: 0.75rem; padding: var(--space-sm) 0;" data-action="add-designer-agent">
+                                    + Add Agent
+                                </button>
+                            </div>
+                        </details>
                     </div>
-                    <div class="init-card__footer">
-                        <button class="btn btn--primary" id="init-launch-btn" data-action="init-launch">Initialize Swarm</button>
+                    <div class="init-card__footer" style="margin-top: var(--space-md); display: flex; justify-content: flex-end; gap: var(--space-sm); border-top: 1px solid var(--border-secondary); padding-top: var(--space-md);">
+                        <button class="btn btn--primary btn--lg" id="init-launch-btn" data-action="init-launch" style="width: 100%; justify-content: center; font-size: 0.85rem; padding: var(--space-md) 0;">🐝 Launch Swarm Task</button>
                     </div>
                 </div>
             </div>
@@ -113,9 +133,11 @@
 
         <!-- ─── Right: Workspace & Activity ─── -->
         <section class="panel alerts-panel" id="alerts-panel">
-            <div class="panel__header" style="justify-content: flex-start; gap: 0; padding: 0; height: 35px; min-height: 35px; border-bottom: 1px solid var(--border-secondary);">
-                <div class="right-panel-tab right-panel-tab--active" id="right-tab-editor" data-action="switch-right-tab" data-tab="editor" style="flex: 1; text-align: center; height: 100%; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.77rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-bright); background: var(--bg-primary); border-right: 1px solid var(--border-secondary); border-top: 2px solid var(--accent-blue);">Code Editor</div>
-                <div class="right-panel-tab" id="right-tab-activity" data-action="switch-right-tab" data-tab="activity" style="flex: 1; text-align: center; height: 100%; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.77rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); background: var(--bg-tertiary); border-top: 2px solid transparent;">Activity <span class="panel__badge" id="alerts-count" style="margin-left: 6px;">0</span></div>
+            <div class="panel__header">
+                <span class="panel__title">Code Editor</span>
+                <div id="right-tab-editor" style="display: none;"></div>
+                <div id="right-tab-activity" style="display: none;"></div>
+                <span id="alerts-count" style="display: none;">0</span>
             </div>
             <div class="panel__body" id="alerts-list">
                 <!-- Code Editor or Swarm Activity rendered dynamically by JS -->
@@ -123,6 +145,20 @@
         </section>
 
     </main>
+
+    <!-- ═══════════ Bottom Drawer ═══════════ -->
+    <div class="bottom-drawer" id="drawer">
+        <div class="bottom-drawer__header">
+            <div class="bottom-drawer__tabs">
+                <button class="bottom-drawer__tab" data-action="switch-drawer-tab" data-tab="activity">Activity</button>
+                <button class="bottom-drawer__tab" data-action="switch-drawer-tab" data-tab="logs">Logs</button>
+            </div>
+            <button class="icon-btn" data-action="close-drawer">✕</button>
+        </div>
+        <div class="bottom-drawer__body" id="drawer-body">
+            <!-- Dynamic drawer contents -->
+        </div>
+    </div>
 
     <!-- ═══════════ Bottom Bar ═══════════ -->
     <footer class="bottom-bar" id="bottom-bar">
@@ -146,38 +182,7 @@
     </footer>
 </div>
 
-<!-- ═══════════ Launch Swarm Modal ═══════════ -->
-<div class="modal-overlay" id="launch-modal">
-    <div class="modal">
-        <div class="modal__header">
-            <h2 class="modal__title">🚀 Launch New Swarm</h2>
-            <button class="icon-btn" data-action="close-launch">✕</button>
-        </div>
-        <div class="modal__body">
-            <div class="form-group">
-                <label class="form-label" for="launch-goal">Macro Goal</label>
-                <input type="text" class="form-input" id="launch-goal" placeholder="e.g. Implement JWT authentication with key rotation">
-            </div>
-            <div class="form-group">
-                <label class="form-label" for="launch-budget">Output Token Budget Cap</label>
-                <input type="number" class="form-input" id="launch-budget" value="20000" min="100" step="100">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Agent Configuration</label>
-                <div class="agent-designer-list" id="designer-agents">
-                    <!-- Dynamic agent rows -->
-                </div>
-                <button class="btn btn--ghost" style="margin-top: var(--space-sm); width: 100%; justify-content: center;" data-action="add-designer-agent">
-                    + Add Agent
-                </button>
-            </div>
-        </div>
-        <div class="modal__footer">
-            <button class="btn" data-action="close-launch">Cancel</button>
-            <button class="btn btn--primary btn--lg" data-action="launch-swarm">🐝 Launch Swarm</button>
-        </div>
-    </div>
-</div>
+<!-- ═══════════ Launch Swarm Modal (Consolidated into Init Modal) ═══════════ -->
 
 <!-- ═══════════ Synthesis (Combined Deliverable) Modal ═══════════ -->
 <div class="modal-overlay" id="synthesis-modal">
@@ -210,8 +215,27 @@
     </div>
 </div>
 
+<!-- ═══════════ Agent Inspector Slide Panel ═══════════ -->
+<div class="slide-panel" id="inspector">
+    <div class="slide-panel__header">
+        <h2 class="slide-panel__title" id="inspector-title">Agent Inspector</h2>
+        <button class="icon-btn" data-action="close-inspector">✕</button>
+    </div>
+    <div class="inspector-tabs-container">
+        <div class="inspector-tabs">
+            <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="overview">Overview</button>
+            <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="budget">Budget</button>
+            <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="trace">Trace</button>
+            <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="memory">Memory</button>
+        </div>
+    </div>
+    <div class="slide-panel__body" id="inspector-body">
+        <!-- Dynamic agent inspector contents -->
+    </div>
+</div>
+
 <!-- ═══════════ Slide Panel Backdrop ═══════════ -->
-<div class="modal-overlay" id="slide-backdrop" data-action="close-edit"></div>
+<div class="modal-overlay" id="slide-backdrop" data-action="close-slide-panels"></div>
 
 <!-- ═══════════ Toast Container ═══════════ -->
 <div class="toast-container" id="toast-container"></div>
