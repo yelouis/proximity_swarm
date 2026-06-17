@@ -35,6 +35,7 @@
                     <div class="dropdown__item dropdown__item--danger" data-action="clean" data-target="all">🔥 Clean Everything</div>
                 </div>
             </div>
+            <button class="btn" id="synthesis-btn" data-action="view-synthesis" title="Combined deliverable report (hierarchical synthesis)">📄 Report</button>
             <button class="btn btn--primary btn--lg" id="launch-btn" data-action="open-launch">
                 🚀 New Swarm
             </button>
@@ -43,6 +44,17 @@
 
     <!-- ═══════════ Main Content ═══════════ -->
     <main class="main-content" id="main-content">
+
+        <!-- ─── Far Left: Activity Bar (view switcher) ─── -->
+        <nav class="activity-bar" id="activity-bar">
+            <button class="activity-bar__item" data-action="switch-tab" data-tab="overview" title="Overview">🗂️</button>
+            <button class="activity-bar__item activity-bar__item--active" data-action="switch-tab" data-tab="clusters" title="Swarm map">🗺️</button>
+            <button class="activity-bar__item" data-action="switch-tab" data-tab="workspace" title="Workspace / editor">📁</button>
+            <button class="activity-bar__item" data-action="switch-tab" data-tab="trace" title="Causal trace">🔍</button>
+            <button class="activity-bar__item" data-action="switch-tab" data-tab="memory" title="Memory">🧠</button>
+            <button class="activity-bar__item" data-action="switch-tab" data-tab="logs" title="Logs">📜</button>
+            <span class="activity-bar__spacer"></span>
+        </nav>
 
         <!-- ─── Left: Agent Sidebar ─── -->
         <section class="panel sidebar" id="agent-sidebar">
@@ -61,15 +73,8 @@
 
         <!-- ─── Center: Main Viewport ─── -->
         <section class="panel viewport" id="main-viewport" style="position: relative;">
-            <div class="viewport__tabs" id="viewport-tabs">
-                <div class="viewport__tab" data-tab="overview" data-action="switch-tab">Overview</div>
-                <div class="viewport__tab viewport__tab--active" data-tab="clusters" data-action="switch-tab">Cluster Map</div>
-                <div class="viewport__tab" data-tab="workspace" data-action="switch-tab">Workspace</div>
-                <div class="viewport__tab" data-tab="trace" data-action="switch-tab">Trace Graph</div>
-                <div class="viewport__tab" data-tab="memory" data-action="switch-tab">Memory</div>
-                <div class="viewport__tab" data-tab="logs" data-action="switch-tab">Logs</div>
-                <div class="viewport__tab" data-tab="agent-chat" data-action="switch-tab" id="agent-chat-tab" style="display: none;">Agent Chat</div>
-            </div>
+            <!-- Hidden tab anchor kept for the agent-chat view label (navigation moved to the activity bar) -->
+            <div id="agent-chat-tab" style="display: none;"></div>
             <div class="viewport__content" id="viewport-content">
                 <!-- Dynamic content rendered by JS -->
             </div>
@@ -132,9 +137,12 @@
                 spellcheck="false"
             >
         </div>
-        <div class="log-tail" id="log-tail">
+        <!-- Full log feed lives in the Logs view / drawer; latest line is mirrored in the status bar -->
+        <div class="log-tail" id="log-tail" style="display: none;">
             <div class="log-tail__line log-tail__line--info">Proximity Swarm V3 initialized. Ready.</div>
         </div>
+        <!-- Blue status bar (VS Code) -->
+        <div class="status-bar" id="status-bar"></div>
     </footer>
 </div>
 
@@ -167,6 +175,22 @@
         <div class="modal__footer">
             <button class="btn" data-action="close-launch">Cancel</button>
             <button class="btn btn--primary btn--lg" data-action="launch-swarm">🐝 Launch Swarm</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════ Synthesis (Combined Deliverable) Modal ═══════════ -->
+<div class="modal-overlay" id="synthesis-modal">
+    <div class="modal" style="max-width: 840px; width: 92%;">
+        <div class="modal__header">
+            <h2 class="modal__title">📄 Combined Deliverable Synthesis</h2>
+            <button class="icon-btn" data-action="close-synthesis">✕</button>
+        </div>
+        <div class="modal__body" id="synthesis-body" style="max-height: 70vh; overflow: auto;">
+            <div class="empty-state"><div class="empty-state__desc">Loading synthesis…</div></div>
+        </div>
+        <div class="modal__footer">
+            <button class="btn" data-action="close-synthesis">Close</button>
         </div>
     </div>
 </div>

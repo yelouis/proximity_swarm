@@ -1,6 +1,41 @@
-# Technical Design Document: Proximity Swarm V2
+# Technical Design Document: Proximity Swarm
 
-Proximity Swarm V2 is an agentic framework designed to coordinate a swarm of autonomous agents working on complex tasks. It applies cellular-automata-style rules (inspired by Conway's Game of Life) and semantic spatial proximity to manage resource consumption, accelerate task execution, and share learnings dynamically.
+Proximity Swarm is an agentic framework that coordinates a swarm of autonomous agents working on
+complex tasks. It applies cellular-automata-style rules (inspired by Conway's Game of Life) and
+semantic spatial proximity to manage resource consumption, accelerate task execution, and share
+learnings dynamically.
+
+This document is the **backend / system spec** (orchestration, agents, coordination, learning,
+and the terminal interface). The **web dashboard** has its own spec in
+[`ui_design_document.md`](ui_design_document.md); the simplification rationale is in
+[`simplified_ui_design.md`](simplified_ui_design.md).
+
+## Implementation status
+
+Every feature below is implemented and has test coverage. The sections retain their original
+numbering; the groups are conceptual.
+
+| # | Feature | Primary module(s) | Tests | Status |
+|---|---|---|---|---|
+| 1 | Architecture (supervisor / monitor / runner / TUI) | `supervisor.py`, `proximity_monitor.py`, `agent_runner.py`, `terminal_dashboard.py` | — | ✅ |
+| 2 | Storage layout (`.proximity_swarm/`) | all modules | — | ✅ |
+| 3 | Storage clean commands | `terminal_dashboard.py`, `web_dashboard.py` | `test_clean.py` | ✅ |
+| 4 | Swarm designer + LLM recommendations | `terminal_dashboard.py`, `supervisor.py` | `test_personalities.py` | ✅ |
+| 5 | Deconfliction & collision negotiation | `proximity_monitor.py`, `agent_runner.py` | `test_proximity.py`, `test_monitor.py` | ✅ |
+| 6 | Verification plan & automated tests | `tests/` | — | ✅ |
+| 7 | Hierarchical artifact synthesis | `terminal_dashboard.py` | `test_artifact_combination.py` | ✅ |
+| 8 | TUI enhancements | `terminal_dashboard.py` | — | ✅ |
+| 9 | Episodic memory | `memory_store.py` | `test_memory.py` | ✅ |
+| 10 | Three-tier hierarchical scaling | `supervisor.py` | `test_hierarchical_scaling.py` | ✅ |
+| 11 | Dynamic proximity weighting | `proximity_monitor.py` | `test_proximity_weighting.py` | ✅ |
+| 12 | Causal graph tracing | `causal_tracer.py` | `test_causal_tracer.py` | ✅ |
+| 13 | Self-healing verification loop | `agent_runner.py` | `test_self_healing.py` | ✅ |
+| 14 | Interactive budget & leaf pruning | `supervisor.py`, `proximity_monitor.py`, `terminal_dashboard.py` | `test_v2.py` | ✅ |
+| 15 | Proximity & novelty-driven spawning | `agent_runner.py` | `test_collatz_research.py` | ✅ |
+
+**Conceptual groups:** *Architecture & storage* (§1–2) · *Coordination & lifecycle* (§5, §10,
+§14, §15) · *Execution & reliability* (§11, §13) · *Learning & observability* (§7, §9, §12) ·
+*Interfaces & operations* (§3, §4, §6, §8).
 
 ---
 
@@ -221,13 +256,28 @@ To debug and trace the non-deterministic trajectories of agents, the framework i
 
 ---
 
-## 13. Ralph Wiggum Loop Integration Concepts (Self-Healing & Persistence)
+## 13. Self-Healing Verification Loop (Ralph Wiggum Loop)
 
-To introduce high-reliability self-healing execution at the step level, the system is designed to incorporate core principles from the **Ralph Wiggum Loop** methodology ("persistence over perfection"):
+High-reliability, step-level self-healing built on the **Ralph Wiggum Loop** principle
+("persistence over perfection"). Implemented in `agent_runner.py`
+(`run_verification`, `heal_file`, `run_verification_loop`, and the gate inside `execute_step`);
+covered by `tests/test_self_healing.py`. A step opts in by declaring a `"verification"` shell
+command in its task definition (e.g. `"pytest test_cache.py"`); steps without one behave exactly
+as before, so the feature is fully backward-compatible.
 
-- **Self-Healing Inner Loop**: When an agent executes a step, the runner does not simply write the output file and proceed. If verification tools (e.g., `pytest`, `gcc`, or custom linters) are specified for the step, the runner executes them locally. If a failure (non-zero exit code) is encountered, the runner enters a self-healing iteration loop, feeding the failure back to the LLM to patch the file, repeating up to a maximum number of attempts before declaring a step blocker/tombstone.
-- **Context Window Resetting**: During the self-healing retry iterations, the chat message history is reset. Instead of accumulating previous failed attempts (which dilutes the local LLM's instruction-following quality), the runner initiates a clean context window containing only the target goals, the current file contents, and the raw compiler/test traceback error.
-- **Test-Driven Progress Gates**: The agent's progress bar (e.g. 33% -> 66%) is strictly tied to successful step verification. A step is not counted as completed, and progress is not advanced, until the associated verification tests return exit code 0, ensuring TUI progress indicators reflect concrete math/compilation milestones.
+- **Self-Healing Inner Loop**: After a step writes its file(s), if the step declares a
+  verification command the runner executes it in the agent's workspace. On a non-zero exit code it
+  enters a self-healing loop — feeding the raw failure back to the LLM to patch the file and
+  re-running verification — up to `MAX_HEAL_ATTEMPTS` (default 3, env-overridable via
+  `PROXIMITY_MAX_HEAL_ATTEMPTS`). If it still fails, the step is declared a blocker, a tombstone is
+  registered, and the agent moves to `pending_termination`.
+- **Context Window Resetting**: Each heal attempt builds a **fresh** prompt containing only the
+  goal, the current file contents, and the raw verification error — prior failed attempts are
+  intentionally not accumulated, which keeps a local model's instruction-following sharp. If no LLM
+  patcher is available (offline), the loop stops gracefully rather than spinning.
+- **Test-Driven Progress Gates**: `steps_completed` / `progress` advance **only** after
+  verification returns exit code 0. A step that cannot pass is never counted as complete, so
+  progress indicators reflect concrete, verified milestones rather than mere execution.
 
 ---
 

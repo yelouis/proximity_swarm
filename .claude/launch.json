@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "swarm-web",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["web_dashboard.py", "--port", "8090", "--llm-provider", "rules"],
+      "port": 8090,
+      "autoPort": false
+    }
+  ]
+}

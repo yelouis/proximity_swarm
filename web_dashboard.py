@@ -168,6 +168,82 @@ def get_workspace_files(agent_id):
     return {"files": files, "contents": contents}
 
 
+def _agent_workspace_text(agent_id):
+    """Concatenate an agent's workspace files into a markdown block."""
+    data = get_workspace_files(agent_id)
+    files = sorted(data.get("files", []))
+    contents = data.get("contents", {})
+    if not files:
+        return ""
+    blocks = []
+    for f in files:
+        body = contents.get(f, "")
+        blocks.append(f"**`{f}`**\n\n```\n{body}\n```")
+    return "\n\n".join(blocks)
+
+
+def _synthesize_node(node_id, tree, seen=None):
+    """Recursively merge an agent's deliverables with its sub-agents' (design_doc §7)."""
+    if seen is None:
+        seen = set()
+    if node_id in seen:
+        return ""
+    seen.add(node_id)
+    node = tree[node_id]
+    state = node["state"]
+    role = state.get("personality", "Generalist")
+    goal = state.get("goal", "")
+    content = _agent_workspace_text(node_id)
+    children = sorted(node["children"])
+    if not children:
+        return content if content.strip() else f"*(No output from Agent {node_id} yet)*"
+    child_blocks = []
+    for cid in children:
+        csyn = _synthesize_node(cid, tree, seen)
+        cstate = tree[cid]["state"]
+        child_blocks.append(
+            f"#### Agent {cid} ({cstate.get('personality', 'Generalist')}): {cstate.get('goal', '')}\n\n{csyn}"
+        )
+    parts = [f"## Agent {node_id} ({role}): {goal}"]
+    parts.append(content if content.strip() else f"*(Agent {node_id} is coordinating sub-agents)*")
+    parts.append(f"### Sub-agent contributions to Agent {node_id}")
+    parts.append("\n\n---\n\n".join(child_blocks))
+    return "\n\n".join(parts)
+
+
+def build_synthesis():
+    """Deterministic hierarchical artifact synthesis (design_doc §7), no LLM required.
+
+    Walks the agent state tree and merges each agent's workspace deliverables with its
+    sub-agents' contributions bottom-up into a single combined markdown report.
+    """
+    tree = {}
+    for data in get_all_agents():
+        if not data or "id" not in data:
+            continue
+        aid = data["id"]
+        pid = data.get("parent_id")
+        if pid == "None" or not pid:
+            pid = None
+        tree[aid] = {"id": aid, "parent_id": pid, "children": [], "state": data}
+    for aid, node in tree.items():
+        pid = node["parent_id"]
+        if pid and pid in tree and aid not in tree[pid]["children"]:
+            tree[pid]["children"].append(aid)
+
+    if not tree:
+        return {"markdown": "No agent states found. Launch a swarm to generate a synthesis."}
+
+    roots = sorted([aid for aid, n in tree.items() if n["parent_id"] is None]) or sorted(tree.keys())
+    if len(roots) == 1:
+        markdown = _synthesize_node(roots[0], tree)
+    else:
+        markdown = "# Combined swarm artifact\n\n" + "\n\n---\n\n".join(
+            _synthesize_node(r, tree) for r in roots
+        )
+    return {"markdown": markdown}
+
+
 def get_memory_episodes():
     try:
         sys.path.insert(0, BASE_DIR)
@@ -793,6 +869,8 @@ class SwarmRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/workspaces/"):
             agent_id = path.split("/api/workspaces/")[1]
             return self.send_json(get_workspace_files(agent_id))
+        if path == "/api/synthesis":
+            return self.send_json(build_synthesis())
 
         self.send_json({"error": "Not found"}, 404)
 

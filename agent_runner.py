@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import time
+import subprocess
 import urllib.request
 import urllib.error
 import argparse
@@ -20,6 +21,9 @@ COLLISIONS_DIR = os.path.join(STATE_DIR, "collisions")
 WORKSPACES_DIR = os.path.join(STATE_DIR, "workspaces")
 TOMBSTONES_FILE = os.path.join(STATE_DIR, "tombstones.json")
 MOCK_TASKS_FILE = os.path.join(os.getcwd(), "mock_tasks.json")
+
+# Max self-healing iterations for a step's verification command (design_doc §13).
+MAX_HEAL_ATTEMPTS = int(os.environ.get("PROXIMITY_MAX_HEAL_ATTEMPTS", "3"))
 
 
 CURRENT_AGENT_STATE_FILE = None
@@ -766,6 +770,97 @@ class AgentRunner:
                 pruned_matches.append(t)
         return pruned_matches
 
+    def run_verification(self, command, timeout=60):
+        """Run a step's verification command inside the agent workspace (design_doc §13).
+
+        Returns (passed: bool, output: str). A non-zero exit code, timeout, or launch
+        failure all count as not-passed so the self-healing loop can react to them.
+        """
+        try:
+            proc = subprocess.run(
+                command, shell=True, cwd=self.workspace_dir,
+                capture_output=True, text=True, timeout=timeout
+            )
+            output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            return proc.returncode == 0, output
+        except subprocess.TimeoutExpired:
+            return False, f"Verification timed out after {timeout}s."
+        except Exception as ex:
+            return False, f"Verification command could not run: {ex}"
+
+    def heal_file(self, filename, current_step, error_output):
+        """Re-prompt the LLM with a RESET context window to patch a failing file.
+
+        Per §13, the context contains only the goal, the current file contents, and the
+        raw verification error — prior failed attempts are intentionally not accumulated,
+        which keeps a local model's instruction-following sharp. Returns the patched file
+        content, or None when no LLM patcher is available (offline → loop stops gracefully).
+        """
+        file_path = os.path.join(self.workspace_dir, filename)
+        try:
+            with open(file_path) as fh:
+                current_content = fh.read()
+        except Exception:
+            current_content = ""
+
+        if not (self.llm_provider == "ollama" and is_ollama_running()):
+            return None
+
+        prompt = (
+            f"You are Agent {self.agent_id} ({self.state.get('personality', 'Generalist')}). "
+            f"Goal: '{self.state.get('goal', '')}'.\n"
+            f"Step: {current_step.get('name', 'step')} — {current_step.get('description', '')}\n"
+            f"The file '{filename}' failed its verification command. Fix it so verification passes.\n\n"
+            f"=== CURRENT CONTENT OF {filename} ===\n{current_content}\n\n"
+            f"=== RAW VERIFICATION ERROR ===\n{error_output}\n\n"
+            f"Output ONLY the corrected, complete raw content of '{filename}'. "
+            f"No markdown fences, no commentary."
+        )
+        res = call_ollama_raw(prompt, model=self.ollama_model)
+        if not res:
+            return None
+        if res.startswith("```"):
+            lines = res.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            res = "\n".join(lines)
+        return res
+
+    def run_verification_loop(self, verification_cmd, primary_file, current_step):
+        """Self-healing inner loop (design_doc §13). Runs verification, and on failure
+        re-prompts the LLM to patch `primary_file` with a reset context, retrying up to
+        MAX_HEAL_ATTEMPTS. Returns (passed: bool, attempts: int, last_output: str)."""
+        passed, output = self.run_verification(verification_cmd)
+        attempts = 0
+        while not passed and attempts < MAX_HEAL_ATTEMPTS:
+            attempts += 1
+            self.add_thought_trace(
+                f"Verification failed for '{current_step.get('name', 'step')}' "
+                f"(attempt {attempts}/{MAX_HEAL_ATTEMPTS}). Self-healing '{primary_file}' "
+                f"with a reset context window...",
+                "debugging",
+                {"attempt": attempts, "error": output[:500]}
+            )
+            try:
+                import causal_tracer
+                causal_tracer.log_step_execution(
+                    self.agent_id, current_step.get("step_id", 0),
+                    current_step.get("name", "step"), f"Self-heal attempt {attempts}",
+                    "debugging", {"error": output[:500]}
+                )
+            except Exception:
+                pass
+            patched = self.heal_file(primary_file, current_step, output)
+            if not patched:
+                print("  [Self-Heal] No patch available (LLM offline?). Stopping heal loop.")
+                break
+            with open(os.path.join(self.workspace_dir, primary_file), 'w') as fh:
+                fh.write(patched)
+            passed, output = self.run_verification(verification_cmd)
+        return passed, attempts, output
+
     def execute_step(self):
         self.state = load_json(self.state_file)
         
@@ -1137,7 +1232,59 @@ class AgentRunner:
             return
             
         time.sleep(self.step_delay)
-        
+
+        # === Self-Healing Verification Gate (design_doc §13) ===
+        # If the step declares a verification command, progress only advances once it passes.
+        # On failure we self-heal up to MAX_HEAL_ATTEMPTS; if still failing, the step is
+        # blocked and a tombstone is registered — steps_completed/progress are NOT advanced.
+        verification_cmd = current_step.get("verification")
+        if verification_cmd and step_files:
+            primary_file = step_files[0]
+            passed, attempts, vout = self.run_verification_loop(verification_cmd, primary_file, current_step)
+            if not passed:
+                error_msg = f"Step '{current_step['name']}' verification failed after {attempts} self-heal attempt(s)."
+                print(f"  [VERIFICATION BLOCKER] {error_msg}\n  Output: {vout[:300]}")
+                tombstones = load_json(TOMBSTONES_FILE) or []
+                tombstones.append({
+                    "file_path": primary_file,
+                    "tool_used": step_tools[0] if step_tools else "verification",
+                    "error_message": f"{error_msg} Last output: {vout[:300]}",
+                    "fix_action": "Manual review required; verification command did not pass.",
+                    "timestamp": get_iso_timestamp()
+                })
+                save_json(TOMBSTONES_FILE, tombstones)
+                self.add_thought_trace(
+                    error_msg + " Registering tombstone and proposing termination.",
+                    "failed", {"error": vout[:500], "attempts": attempts}
+                )
+                self.state["status"] = "pending_termination"
+                self.state["blocker_details"] = {
+                    "file_path": primary_file,
+                    "tool_used": step_tools[0] if step_tools else "verification",
+                    "error_message": error_msg,
+                    "fix_action": "Manual review required; verification command did not pass."
+                }
+                save_json(self.state_file, self.state)
+                self.save_memory_episode(status="failed", error_message=error_msg)
+                try:
+                    import causal_tracer
+                    causal_tracer.log_step_execution(
+                        self.agent_id, current_step["step_id"], current_step["name"],
+                        current_step["description"], "failed", {"error": error_msg}
+                    )
+                    causal_tracer.log_state_transition(
+                        self.agent_id, "exploring", "pending_termination", {"error": error_msg}
+                    )
+                except Exception:
+                    pass
+                return
+            heal_note = f" after {attempts} self-heal attempt(s)" if attempts else ""
+            self.add_thought_trace(
+                f"Verification passed for step '{current_step['name']}'{heal_note}.",
+                "completed", {"step_id": current_step.get("step_id"), "attempts": attempts}
+            )
+            print(f"  [VERIFICATION PASSED] {current_step['name']}{heal_note}")
+
         self.state["steps_completed"] += 1
         self.state["progress"] = int((self.state["steps_completed"] / len(steps)) * 100)
         

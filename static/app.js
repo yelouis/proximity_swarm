@@ -113,6 +113,7 @@ function showToast(message, type = 'info') {
 // ---------------------------------------------------------------------------
 function render() {
     renderStatusPill();
+    renderStatusBar();
     renderAgentSidebar();
     renderAlertsPanel();
     renderViewportContent();
@@ -132,6 +133,40 @@ function renderStatusPill() {
         pill.className = 'status-pill status-pill--idle';
         label.textContent = SwarmState.agents.length > 0 ? 'COMPLETED' : 'IDLE';
     }
+}
+
+// ---------------------------------------------------------------------------
+// Blue Status Bar (VS Code) — glanceable global state
+// ---------------------------------------------------------------------------
+function renderStatusBar() {
+    const bar = document.getElementById('status-bar');
+    if (!bar) return;
+    const running = SwarmState.swarm_running;
+    const agents = SwarmState.agents.length;
+    const stateLabel = running ? 'Running' : (agents > 0 ? 'Completed' : 'Idle');
+    const dotCls = running ? 'run' : (agents > 0 ? 'done' : 'idle');
+    const used = (SwarmState.budget_alert && SwarmState.budget_alert.active_count) || getMaxLeafTokens();
+    const cap = SwarmState.session_budget || 20000;
+    const decisions = (SwarmState.pending_spawns || []).length + (SwarmState.pending_blockers || []).length;
+    const collisions = (SwarmState.collisions || []).length;
+    const lastLog = (SwarmState.logs || []).slice(-1)[0] || '';
+
+    let html = '';
+    html += `<span class="status-bar__item"><span class="status-bar__dot status-bar__dot--${dotCls}"></span>${stateLabel}</span>`;
+    html += `<span class="status-bar__item" title="Active agents">◆ ${agents} agent${agents === 1 ? '' : 's'}</span>`;
+    html += `<span class="status-bar__item status-bar__item--clk" data-action="switch-right-tab" data-tab="activity" title="Token budget — open Activity">⛁ ${used.toLocaleString()} / ${cap.toLocaleString()}</span>`;
+    html += `<span class="status-bar__spacer"></span>`;
+    if (decisions > 0) {
+        html += `<span class="status-bar__item status-bar__item--alert status-bar__item--clk" data-action="switch-right-tab" data-tab="activity" title="Pending decisions">🔔 ${decisions} decision${decisions === 1 ? '' : 's'}</span>`;
+    }
+    if (collisions > 0) {
+        html += `<span class="status-bar__item" title="Active collisions">⚡ ${collisions}</span>`;
+    }
+    html += `<span class="status-bar__item status-bar__item--clk" data-action="switch-tab" data-tab="logs" title="View logs">📜 Logs</span>`;
+    if (lastLog) {
+        html += `<span class="status-bar__item status-bar__item--log">${escapeHtml(lastLog)}</span>`;
+    }
+    bar.innerHTML = html;
 }
 
 // ---------------------------------------------------------------------------
@@ -538,9 +573,11 @@ function getMaxLeafTokens() {
 // Viewport Content
 // ---------------------------------------------------------------------------
 function renderViewportContent() {
-    // Update tab active state
-    document.querySelectorAll('.viewport__tab').forEach(tab => {
-        tab.classList.toggle('viewport__tab--active', tab.dataset.tab === UIState.activeTab);
+    // Update active state on the activity bar (and any legacy tab strip)
+    document.querySelectorAll('.viewport__tab, .activity-bar__item').forEach(tab => {
+        const active = tab.dataset.tab === UIState.activeTab;
+        tab.classList.toggle('viewport__tab--active', active);
+        tab.classList.toggle('activity-bar__item--active', active);
     });
 
     // Dynamically update agent chat tab text to show current agent identifier
@@ -2058,6 +2095,12 @@ document.addEventListener('click', (e) => {
                 });
             }
             break;
+        case 'view-synthesis':
+            openSynthesis();
+            break;
+        case 'close-synthesis':
+            document.getElementById('synthesis-modal').classList.remove('modal-overlay--active');
+            break;
     }
 });
 
@@ -2182,6 +2225,9 @@ document.getElementById('command-input').addEventListener('keydown', (e) => {
                 UIState.activeTab = 'logs';
             } else if (target === 'help' || target === 'overview') {
                 UIState.activeTab = 'overview';
+            } else if (target === 'synthesis' || target === 'report') {
+                openSynthesis();
+                return;
             } else if (target) {
                 UIState.activeTab = 'workspace';
                 UIState.selectedWorkspaceAgent = target;
@@ -2247,6 +2293,19 @@ async function initLaunch() {
     } else {
         showToast(result.message || 'Failed to initialize swarm', 'error');
     }
+}
+
+// ---------------------------------------------------------------------------
+// Combined Deliverable Synthesis (design_doc §7)
+// ---------------------------------------------------------------------------
+async function openSynthesis() {
+    const modal = document.getElementById('synthesis-modal');
+    const body = document.getElementById('synthesis-body');
+    modal.classList.add('modal-overlay--active');
+    body.innerHTML = '<div class="empty-state"><div class="empty-state__desc">Generating synthesis…</div></div>';
+    const res = await apiGet('/api/synthesis');
+    const md = (res && res.markdown) ? res.markdown : 'No synthesis available.';
+    body.innerHTML = `<pre style="white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.6; color: var(--text-primary); margin: 0;">${escapeHtml(md)}</pre>`;
 }
 
 // ---------------------------------------------------------------------------
