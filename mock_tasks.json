@@ -368,6 +368,467 @@
         }
       ],
       "is_dynamic": true
+    },
+    "task_dynamic_1781720059_0": {
+      "id": "task_dynamic_1781720059_0",
+      "goal": "Explore strategies to prove or find a counterexample to the Collatz Conjecture (3n+1). Do not assume it is true; survey multiple independent approaches.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Literature Review and Conjecture Formalization",
+          "description": "Systematically review existing proofs, failed attempts, major open questions, and known mathematical generalizations regarding the Collatz function. Formalize the problem constraints in symbolic notation (e.g., for use in theorem provers or computational models).",
+          "touched_files": [
+            "theory/literature_review.md",
+            "math/collatz_formalization.tex"
+          ],
+          "tools": [
+            "research_engine",
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Computational Counterexample Search",
+          "description": "Develop high-performance code (e.g., using Python or C++) to test sequences for extremely large starting numbers (n) and look for counterexamples (numbers that do not reach 1). Implement safeguards and logging for cycle detection.",
+          "touched_files": [
+            "computations/collatz_tester.py",
+            "logs/simulation_results.csv"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest",
+            "run_benchmark"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Number Theory and Invariant Analysis (Proof Attempt)",
+          "description": "Attempt structural proofs by examining number theoretic properties. Search for invariants, necessary conditions for termination, or methods of contradiction (e.g., analyzing parity or modular arithmetic across long sequences). This step focuses purely on mathematical rigor.",
+          "touched_files": [
+            "theory/proof_attempt_1_invariants.tex",
+            "math/modular_analysis_sketches.py"
+          ],
+          "tools": [
+            "edit_file",
+            "symbolic_solver",
+            "theorem_prover_interface"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Alternative State Space Modeling and Generalization",
+          "description": "Explore the conjecture through non-integer or generalized models (e.g., continuous mappings, rational numbers, or higher-dimensional state spaces). Analyze whether generalizing the problem yields insights or necessary tools applicable back to the integer case.",
+          "touched_files": [
+            "theory/generalized_collatz_model.ipynb",
+            "report/summary_of_open_approaches.md"
+          ],
+          "tools": [
+            "edit_file",
+            "jupyter_notebook",
+            "read_documentation"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781721925_0": {
+      "id": "task_dynamic_1781721925_0",
+      "goal": "Attack Collatz via modular arithmetic and residue classes mod 2^k; look for invariants and parity-sequence structure.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Residue Class Formalization",
+          "description": "Formally model the Collatz function T(n) using modular arithmetic by analyzing residues modulo $2^k$. Define functions that transform input $n$ based on its binary representation and residue class to establish mathematical boundaries for iteration.",
+          "touched_files": [
+            "src/math_models/residue_collatz.py",
+            "src/theory/modular_analysis.md"
+          ],
+          "tools": [
+            "edit_file",
+            "sympy",
+            "write_docstring"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Parity Sequence Simulation and Invariant Search",
+          "description": "Systematically simulate Collatz sequences (parities) for small initial values to identify potential invariants\u2014quantities (e.g., accumulated exponent of 2, ratio of steps) that remain constant or follow a predictable pattern within certain residue classes.",
+          "touched_files": [
+            "tests/test_residues.py",
+            "src/simulation/sequence_analyzer.ipynb"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest",
+            "simulate"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Algorithmic Structure Derivation",
+          "description": "Develop advanced algorithms that treat the sequence as a state machine governed by modular arithmetic rules. Derive structural equations linking $n$, the number of divisions ($j$), and the number of odd steps ($s$) over multiple iterations based on residue classes.",
+          "touched_files": [
+            "src/algorithms/collatz_structure_solver.py",
+            "api/derivation_report.md"
+          ],
+          "tools": [
+            "edit_file",
+            "calculate_systematics"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Hypothesis Testing and Validation",
+          "description": "Implement a high-performance test harness to validate any discovered invariants or structural equations. Test these hypotheses against extremely large initial inputs ($n > 2^{64}$) that fall into specific residue classes identified in previous steps.",
+          "touched_files": [
+            "tests/test_large_inputs.py",
+            "src/utils/validation_toolkit.py"
+          ],
+          "tools": [
+            "pytest",
+            "run_benchmarks"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781721925_1": {
+      "id": "task_dynamic_1781721925_1",
+      "goal": "Treat the Collatz map as a discrete dynamical system; study cycles, fixed points, and stopping-time behavior.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Implement Collatz Map Core Functionality",
+          "description": "Define the function C(n) = n/2 (if even) or 3n+1 (if odd). Create a simulation wrapper to generate sequences and validate basic behavior using unit tests.",
+          "touched_files": [
+            "collatz_system.py",
+            "tests/test_collatz.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Develop Cycle and Fixed Point Detection Module",
+          "description": "Implement a general algorithm (e.g., Floyd's cycle-finding) within the system to detect all cycles of arbitrary length. Specifically isolate fixed points (cycles of length 1).",
+          "touched_files": [
+            "src/dynamics.py",
+            "collatz_system.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Measure and Analyze Stopping Time Behavior",
+          "description": "Modify the simulation to track the sequence length (stopping time) required for an initial seed 'n' to reach a terminal state (e.g., 1). Write functions to analyze how stopping time scales with different inputs.",
+          "touched_files": [
+            "collatz_system.py",
+            "reports/stopping_time_analysis.ipynb"
+          ],
+          "tools": [
+            "edit_file",
+            "jupyterlab"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Synthesize Findings and Documentation",
+          "description": "Create a main study script that combines the analysis of cycles and stopping times. Document observed patterns regarding fixed points vs. periodic behavior for various inputs.",
+          "touched_files": [
+            "main_study.py",
+            "README.md",
+            "analysis/results_summary.txt"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781721925_2": {
+      "id": "task_dynamic_1781721925_2",
+      "goal": "Design and describe large-scale numerical verification, counterexample search bounds, and statistical distribution of stopping times.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Literature Review and Scope Definition",
+          "description": "Review current state-of-the-art in large-scale numerical verification methods (e.g., interval analysis, SMT solving) to identify gaps in existing bounding techniques for counterexample searches.",
+          "touched_files": [
+            "theory/verification_review.md",
+            "project_plan.md"
+          ],
+          "tools": [
+            "read_papers",
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Develop Bounding Algorithms",
+          "description": "Formulate the mathematical and algorithmic bounds (e.g., complexity reduction techniques or pruning strategies) necessary to limit search space exploration for counterexamples in complex numerical systems.",
+          "touched_files": [
+            "algorithms/bounding_theory.tex",
+            "src/bound_generator.py"
+          ],
+          "tools": [
+            "edit_file",
+            "mathematical_proof_tool"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Design Stopping Time Simulation Environment",
+          "description": "Create a controlled simulation environment (testbed) to repeatedly execute the verification process under varied inputs and record the elapsed time until termination (stopping times).",
+          "touched_files": [
+            "tests/stop_time_simulation.py",
+            "data/raw_timing_records.csv"
+          ],
+          "tools": [
+            "write_testbed",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Statistical Analysis and Distribution Mapping",
+          "description": "Analyze the collected stopping time data to model its statistical distribution (e.g., Weibull or Gamma distribution) and derive corresponding probability density functions for reporting.",
+          "touched_files": [
+            "analysis/distribution_model.ipynb",
+            "results/statistical_summary.pdf"
+          ],
+          "tools": [
+            "run_simulation",
+            "plot_data"
+          ]
+        },
+        {
+          "step_id": 5,
+          "name": "Synthesize Final Report",
+          "description": "Draft a comprehensive document detailing the implemented verification process, the derived bounding techniques, and the statistical findings regarding stopping time distribution.",
+          "touched_files": [
+            "report/Final_Verification_Report.docx",
+            "theory/overall_summary.md"
+          ],
+          "tools": [
+            "edit_file",
+            "generate_figures"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781721925_3": {
+      "id": "task_dynamic_1781721925_3",
+      "goal": "Use probabilistic and analytic heuristics (expected drift of log n, density arguments) to argue why Collatz should hold.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "General Execution",
+          "description": "Perform tasks for: Use probabilistic and analytic heuristics (expected drift of log n, density arguments) to argue why Collatz should hold.",
+          "touched_files": [
+            "src/agent_004_output.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781760791_0": {
+      "id": "task_dynamic_1781760791_0",
+      "goal": "Attack Collatz via modular arithmetic and residue classes mod 2^k; look for invariants and parity-sequence structure.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "General Execution",
+          "description": "Perform tasks for: Attack Collatz via modular arithmetic and residue classes mod 2^k; look for invariants and parity-sequence structure.",
+          "touched_files": [
+            "src/agent_001_output.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781760791_1": {
+      "id": "task_dynamic_1781760791_1",
+      "goal": "Treat the Collatz map as a discrete dynamical system; study cycles, fixed points, and stopping-time behavior.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Implement Collatz Map Function",
+          "description": "Create a core function that accurately calculates the next state in the Collatz sequence (C(N)). This foundational module will handle even/odd checks and apply the transformation rules.",
+          "touched_files": [
+            "src/collatz_map.py"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Cycle and Fixed Point Detection",
+          "description": "Develop a traversal function that takes an initial number N. During the simulation, use state tracking (e.g., a set of visited numbers) to identify if a number repeats (indicating a cycle) or stabilizes at a constant value (fixed point).",
+          "touched_files": [
+            "src/collatz_analyzer.py"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Stopping Time Calculation",
+          "description": "Implement a specific metric function that counts the total number of steps (the stopping time T(N)) required for a trajectory starting at N to reach the value 1. This requires modifying the cycle detection mechanism to specifically track convergence to the known endpoint.",
+          "touched_files": [
+            "src/collatz_analyzer.py"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Comprehensive System Validation and Testing",
+          "description": "Write comprehensive test cases using known sequences (e.g., N=6, N=27) to ensure cycle detection, fixed point identification, and stopping time calculations are accurate across varying input sizes and convergence behaviors.",
+          "touched_files": [
+            "tests/test_collatz.py",
+            "README.md"
+          ],
+          "tools": [
+            "pytest"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781760791_2": {
+      "id": "task_dynamic_1781760791_2",
+      "goal": "Design and describe large-scale numerical verification, counterexample search bounds, and statistical distribution of stopping times.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Define Theoretical Framework and Scope",
+          "description": "Establish the formal mathematical model (e.g., differential equations, state space representation) that governs the system under verification. This includes defining input constraints and desired properties.",
+          "touched_files": [
+            "theory/model_spec.md",
+            "src/mathematical_framework.py"
+          ],
+          "tools": [
+            "edit_file",
+            "latex_renderer"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Design Numerical Verification Core",
+          "description": "Develop the large-scale numerical verification engine. This involves implementing simulation loops and parallel computation methods to test system behavior against defined properties.",
+          "touched_files": [
+            "src/numerical_verifier.py",
+            "tests/integration_test.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest",
+            "numba"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Implement Counterexample Search Bounds",
+          "description": "Develop modules that systematically calculate and restrict the search space for potential counterexamples. This involves incorporating theoretical bounds (e.g., lattice point counting) to achieve computational feasibility.",
+          "touched_files": [
+            "src/bound_searcher.py",
+            "theory/bounds_mathematics.pdf"
+          ],
+          "tools": [
+            "edit_file",
+            "sympy"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Analyze Stopping Time Distributions",
+          "description": "Execute large-scale simulations using the developed model to measure stopping times (convergence/termination) across diverse datasets. Analyze these metrics statistically to generate and characterize distribution profiles.",
+          "touched_files": [
+            "src/stop_time_analyzer.py",
+            "results/distribution_summary.ipynb",
+            "reports/stopping_time_stats.pdf"
+          ],
+          "tools": [
+            "edit_file",
+            "numpy",
+            "matplotlib"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781760791_3": {
+      "id": "task_dynamic_1781760791_3",
+      "goal": "Use probabilistic and analytic heuristics (expected drift of log n, density arguments) to argue why Collatz should hold.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Establish Collatz Framework",
+          "description": "Formulate the core recurrence relation and define the parameters for probabilistic analysis (e.g., expected ratio of even to odd steps). Outline the key variables for calculating log drift.",
+          "touched_files": [
+            "analysis/collatz_framework.md",
+            "mathematics/log_drift_model.py"
+          ],
+          "tools": [
+            "edit_file",
+            "python_scripting"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Calculate Expected Logarithmic Drift",
+          "description": "Model the random walk behavior of the sequence by calculating the expected value of log(n) over a large number of steps. Demonstrate that this expected drift is negative (i.e., decreasing trend), suggesting convergence toward small values.",
+          "touched_files": [
+            "analysis/log_drift_calculation.md",
+            "mathematics/probability_model.py"
+          ],
+          "tools": [
+            "edit_file",
+            "python_scripting"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Apply Density and Constraint Arguments",
+          "description": "Use density arguments to constrain potential counterexamples (non-trivial cycles or divergence). Prove that if a cycle exists, its elements must satisfy extremely restrictive mathematical conditions rarely met by numbers of large density.",
+          "touched_files": [
+            "analysis/density_arguments.md",
+            "proofs/cycle_constraints.tex"
+          ],
+          "tools": [
+            "edit_file",
+            "latex_compiler"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Synthesize Final Heuristic Argumentation",
+          "description": "Combine the results from steps 2 (drift) and 3 (density constraints) into a comprehensive, formal white paper. Argue that the combined probabilistic tendency toward decay, coupled with restrictive analytical proofs against cyclic/divergent paths, strongly suggests Collatz must hold.",
+          "touched_files": [
+            "final_report/heuristic_argumentation.docx"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
     }
   }
 }

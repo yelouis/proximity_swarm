@@ -10,7 +10,10 @@ Usage:
 
 import os
 import sys
+import socket
+socket.getfqdn = lambda x=None: "localhost" if x is None else x
 import json
+time_import = None # Keep layout intact
 import time
 import threading
 import subprocess
@@ -332,7 +335,7 @@ def get_full_state():
     pending_blockers = []
     for a in agents:
         aid = a.get("id", "")
-        sr = a.get("spawn_request", {})
+        sr = a.get("spawn_request") or {}
         if sr.get("status") == "pending":
             pending_spawns.append({
                 "agent_id": aid,
