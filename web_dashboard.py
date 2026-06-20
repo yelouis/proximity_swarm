@@ -48,6 +48,7 @@ server_state = {
     "predefined_agents": [],
     "swarm_running": False,
     "macro_goal": "",
+    "auto_approve_spawns": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -361,6 +362,7 @@ def get_full_state():
         "macro_goal": server_state["macro_goal"],
         "session_budget": server_state["session_budget"],
         "predefined_agents": server_state["predefined_agents"],
+        "auto_approve_spawns": server_state.get("auto_approve_spawns", False),
         "state_hash": compute_state_hash(),
     }
 
@@ -434,89 +436,94 @@ def launch_swarm(goal, agents_config, budget):
 
     server_state["macro_goal"] = goal
     server_state["session_budget"] = budget
+    server_state["swarm_running"] = True
 
     write_to_monitor_log(f"Launching swarm for goal: '{goal}' with {len(agents_config)} agents", "INFO")
 
-    # Prepare orchestrator.json
-    os.makedirs(STATE_DIR, exist_ok=True)
-    sub_swarms = {
-        "swarm_001": {
-            "id": "swarm_001",
-            "goal": goal,
-            "role": "Primary Swarm",
-            "dependencies": [],
-            "status": "pending",
-            "agent_ids": [a["agent_id"] for a in agents_config],
-        }
-    }
-    save_json(ORCHESTRATOR_FILE, {"macro_goal": goal, "sub_swarms": sub_swarms})
-
-    # Decompose goals and register tasks
-    now_ts = int(time.time())
-    final_configs = []
-    for idx, agent in enumerate(agents_config):
-        agent_id = agent.get("agent_id", f"{idx + 1:03d}")
-        agent_role = agent.get("personality", agent.get("role", "Generalist"))
-        agent_goal = agent.get("goal", goal)
-
-        write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role})...", "INFO")
-        steps = generate_task_steps_via_llm(agent_goal)
-        if not steps:
-            steps = [
-                {
-                    "step_id": 1,
-                    "name": "General Execution",
-                    "description": f"Perform tasks for: {agent_goal}",
-                    "touched_files": [f"src/agent_{agent_id}_output.md"],
-                    "tools": ["edit_file"],
+    def _bg_launch():
+        try:
+            # Prepare orchestrator.json
+            os.makedirs(STATE_DIR, exist_ok=True)
+            sub_swarms = {
+                "swarm_001": {
+                    "id": "swarm_001",
+                    "goal": goal,
+                    "role": "Primary Swarm",
+                    "dependencies": [],
+                    "status": "pending",
+                    "agent_ids": [a["agent_id"] for a in agents_config],
                 }
+            }
+            save_json(ORCHESTRATOR_FILE, {"macro_goal": goal, "sub_swarms": sub_swarms})
+
+            # Decompose goals and register tasks
+            now_ts = int(time.time())
+            final_configs = []
+            for idx, agent in enumerate(agents_config):
+                agent_id = agent.get("agent_id", f"{idx + 1:03d}")
+                agent_role = agent.get("personality", agent.get("role", "Generalist"))
+                agent_goal = agent.get("goal", goal)
+
+                write_to_monitor_log(f"Decomposing goal for Agent {agent_id} ({agent_role})...", "INFO")
+                steps = generate_task_steps_via_llm(agent_goal)
+                if not steps:
+                    steps = [
+                        {
+                            "step_id": 1,
+                            "name": "General Execution",
+                            "description": f"Perform tasks for: {agent_goal}",
+                            "touched_files": [f"src/agent_{agent_id}_output.md"],
+                            "tools": ["edit_file"],
+                        }
+                    ]
+                task_id = f"task_dynamic_{now_ts}_{idx}"
+                register_dynamic_task(task_id, agent_goal, steps)
+                final_configs.append({
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "personality": agent_role,
+                    "goal": agent_goal,
+                    "sub_swarm_id": "swarm_001",
+                })
+
+            # Launch supervisor subprocess
+            cmd = [
+                sys.executable,
+                os.path.join(BASE_DIR, "supervisor.py"),
+                "--agents-config", json.dumps(final_configs),
+                "--llm-provider", server_state["llm_provider"],
+                "--step-delay", "1.5",
+                "--budget", str(budget),
             ]
-        task_id = f"task_dynamic_{now_ts}_{idx}"
-        register_dynamic_task(task_id, agent_goal, steps)
-        final_configs.append({
-            "agent_id": agent_id,
-            "task_id": task_id,
-            "personality": agent_role,
-            "goal": agent_goal,
-            "sub_swarm_id": "swarm_001",
-        })
+            if server_state.get("auto_approve_spawns"):
+                cmd.append("--auto-approve-spawns")
 
-    # Launch supervisor subprocess
-    cmd = [
-        sys.executable,
-        os.path.join(BASE_DIR, "supervisor.py"),
-        "--agents-config", json.dumps(final_configs),
-        "--llm-provider", server_state["llm_provider"],
-        "--step-delay", "1.5",
-        "--budget", str(budget),
-    ]
-    write_to_monitor_log(f"Launching supervisor: {' '.join(cmd[:6])}...", "INFO")
+            write_to_monitor_log(f"Launching supervisor: {' '.join(cmd[:6])}...", "INFO")
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=BASE_DIR,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        server_state["supervisor_proc"] = proc
-        server_state["swarm_running"] = True
-        server_state["predefined_agents"] = []
+            proc = subprocess.Popen(
+                cmd,
+                cwd=BASE_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            server_state["supervisor_proc"] = proc
+            server_state["predefined_agents"] = []
 
-        # Monitor supervisor in background
-        def monitor_proc():
-            proc.wait()
+            # Monitor supervisor in background
+            def monitor_proc():
+                proc.wait()
+                server_state["swarm_running"] = False
+                server_state["supervisor_proc"] = None
+                write_to_monitor_log("Supervisor process exited.", "INFO")
+
+            t = threading.Thread(target=monitor_proc, daemon=True)
+            t.start()
+        except Exception as ex:
             server_state["swarm_running"] = False
-            server_state["supervisor_proc"] = None
-            write_to_monitor_log("Supervisor process exited.", "INFO")
+            write_to_monitor_log(f"Failed to launch supervisor in background: {ex}", "ERROR")
 
-        t = threading.Thread(target=monitor_proc, daemon=True)
-        t.start()
-
-        return True, f"Swarm launched with {len(final_configs)} agents"
-    except Exception as ex:
-        server_state["swarm_running"] = False
-        return False, f"Failed to launch supervisor: {ex}"
+    threading.Thread(target=_bg_launch, daemon=True).start()
+    return True, f"Swarm launched with {len(agents_config)} agents"
 
 # ---------------------------------------------------------------------------
 # Action handlers
@@ -890,7 +897,14 @@ class SwarmRequestHandler(BaseHTTPRequestHandler):
             if provider in ["ollama", "gemini"]:
                 server_state["llm_provider"] = provider
                 write_to_monitor_log(f"LLM Provider updated to {provider} via web UI.", "INFO")
-            return self.send_json({"success": True, "llm_provider": server_state["llm_provider"]})
+            if "auto_approve_spawns" in body:
+                server_state["auto_approve_spawns"] = bool(body["auto_approve_spawns"])
+                write_to_monitor_log(f"Auto-approve spawns updated to {server_state['auto_approve_spawns']} via web UI.", "INFO")
+            return self.send_json({
+                "success": True, 
+                "llm_provider": server_state["llm_provider"],
+                "auto_approve_spawns": server_state.get("auto_approve_spawns", False)
+            })
 
         if path == "/api/run":
             goal = body.get("goal", "")

@@ -332,9 +332,7 @@ Harness setup complete (§1); state clean; Init overlay visible; provider will b
 
 **1.5 — Read the global idea stream.**
 - The **global** interleaved timeline renders only when **no agent is selected**
-  (`selectedAgentId === null`) — and there is no "deselect" gesture, so observe it **right after
-  launch, before clicking any node/row** (or after a page reload, which resets selection). Switch
-  the stage to **Timeline** while nothing is selected.
+  (`selectedAgentId === null`). You can clear the selection (deselect) at any time by clicking on the empty map canvas, pressing the `Escape` key, or clicking the **✕ Show all agents** button next to the stage toggle. Switch the stage to **Timeline** while nothing is selected.
 - *Expected:* an interleaved, time-ordered stream of thought traces from **all four** agents, each
   tagged with its `Agent 0XX:` author — you can watch four ideas progress in parallel. **Contract
   to validate:** once you single-click any agent, the same Timeline **scopes to that agent**; this

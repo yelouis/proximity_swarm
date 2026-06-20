@@ -237,7 +237,7 @@ def load_active_agents():
             try:
                 with open(filepath, 'r') as f:
                     data = json.load(f)
-                    if data.get("status") in ["exploring", "syncing", "pending_termination"]:
+                    if data.get("status") in ["exploring", "syncing", "pending_termination", "awaiting_child"]:
                         agents.append(data)
             except Exception as e:
                 logging.error(f"Error loading agent file {filename}: {e}")
@@ -256,6 +256,7 @@ def save_agent_state(agent):
 
 
 INTERACTIVE = False
+AUTO_APPROVE_SPAWNS = True
 
 
 def handle_spawn_requests(agents):
@@ -264,12 +265,12 @@ def handle_spawn_requests(agents):
         spawn_req = agent.get("spawn_request")
         if spawn_req:
             status = spawn_req.get("status", "pending")
-            if INTERACTIVE:
+            if not AUTO_APPROVE_SPAWNS or INTERACTIVE:
                 if status == "pending":
                     # Wait for interactive approval in dashboard
                     continue
                 elif status == "rejected":
-                    logging.info(f"Agent {agent['id']} spawn request REJECTED by user. Clearing request.")
+                    logging.info(f"Agent {agent['id']} spawn request REJECTED. Clearing request.")
                     agent["spawn_request"] = None
                     save_agent_state(agent)
                     continue
@@ -367,7 +368,7 @@ def evaluate_consensus_gate(agents):
             for other in agents:
                 if other["id"] == agent["id"]:
                     continue
-                if other["status"] not in ["exploring", "syncing"]:
+                if other["status"] not in ["exploring", "syncing", "awaiting_child"]:
                     continue
                     
                 # Coverage criteria: same task_id, or high cosine similarity
@@ -613,7 +614,7 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
             handle_spawn_requests(agents)
             
             agents = load_active_agents()
-            active_agents = [a for a in agents if a["status"] in ["exploring", "syncing", "pending_termination"]]
+            active_agents = [a for a in agents if a["status"] in ["exploring", "syncing", "pending_termination", "awaiting_child"]]
             
             # Dynamically read budget limit from orchestrator.json if present
             orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
@@ -782,11 +783,13 @@ if __name__ == "__main__":
     parser.add_argument("--ollama-model", default="gemma4:latest", help="Ollama model to use for phase classification")
     parser.add_argument("--interactive", action="store_true", help="Enable terminal prompts to manually negotiate collisions")
     parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
+    parser.add_argument("--auto-approve-spawns", action="store_true", help="Bypass manual operator approval for spawn requests")
     args = parser.parse_args()
     
     OLLAMA_MODEL = args.ollama_model
     INTERACTIVE = args.interactive
     BUDGET = args.budget
+    AUTO_APPROVE_SPAWNS = args.auto_approve_spawns
     
     try:
         monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold)

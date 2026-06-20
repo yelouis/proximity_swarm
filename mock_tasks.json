@@ -829,6 +829,205 @@
         }
       ],
       "is_dynamic": true
+    },
+    "task_dynamic_1781988497_0": {
+      "id": "task_dynamic_1781988497_0",
+      "goal": "Attack Collatz via modular arithmetic and residue classes mod 2^k; look for invariants and parity-sequence structure.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Build Core Collatz Engine",
+          "description": "Implement a robust simulator that tracks the sequence of operations and the value modulo $2^k$. Develop helper functions to identify residue classes for input numbers.",
+          "touched_files": [
+            "src/collatz_engine.py",
+            "tests/test_modularity.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Modular Residue Analysis (Mod $2^k$)",
+          "description": "Systematically analyze the transformation function ($n \to (3n+1)/2$) under constraints defined by residue classes modulo $2^k$. Focus on how odd inputs behave within specific residue rings.",
+          "touched_files": [
+            "src/mod_arithmetic_solver.py",
+            "data/residue_class_inputs.csv"
+          ],
+          "tools": [
+            "edit_file",
+            "calculate_series"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Parity Sequence and Invariant Mining",
+          "description": "Run simulations across varied initial numbers (particularly those spanning multiple residue classes) to generate and analyze the parity sequence. Search for recurring metrics or quantities that remain invariant (or predictable) regardless of length.",
+          "touched_files": [
+            "src/sequence_analyzer.py",
+            "results/invariant_candidates.json"
+          ],
+          "tools": [
+            "edit_file",
+            "data_analysis"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Formal Hypothesis Generation and Review",
+          "description": "Based on the identified invariants and structural patterns, formalize mathematical hypotheses regarding cycle structure or growth bounds. Prepare a summary report detailing potential proof paths or counterexamples.",
+          "touched_files": [
+            "docs/collatz_hypothesis_report.md"
+          ],
+          "tools": [
+            "write_document",
+            "peer_review"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781988497_1": {
+      "id": "task_dynamic_1781988497_1",
+      "goal": "Treat the Collatz map as a discrete dynamical system; study cycles, fixed points, and attractor basins.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Implement Collatz Simulation Engine",
+          "description": "Write core Python functions to compute the Collatz sequence for a given initial integer N. The simulator must track the length of the trajectory and detect repeating values (cycles) efficiently using sets or dictionaries.",
+          "touched_files": [
+            "src/collatz_simulator.py",
+            "tests/test_simulation.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Search for Cycles and Fixed Points",
+          "description": "Modify the simulator to specifically search for known fixed points (e.g., n=1) and general cycles (cycles of length k > 1). Implement a detection mechanism that identifies the cycle signature when convergence is reached.",
+          "touched_files": [
+            "src/collatz_simulator.py",
+            "analysis/cycle_finder.py"
+          ],
+          "tools": [
+            "edit_file",
+            "run_script"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Map Attractor Basins (Large Scale Testing)",
+          "description": "Iterate the simulator over a predefined range of initial values (e.g., N = 1 to 1000). Store the final attractor basin destination (the cycle/fixed point found) for every tested input, thereby mapping the basins of attraction.",
+          "touched_files": [
+            "data/basin_map.json",
+            "src/collatz_simulator.py"
+          ],
+          "tools": [
+            "edit_file",
+            "write_data"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Analyze and Visualize Dynamics",
+          "description": "Process the collected data (basin maps, cycle lengths). Generate visualizations\u2014such as phase portraits or basin graphs\u2014and write a comprehensive report analyzing the observed fixed points, periodicity, and general behavior of the dynamical system.",
+          "touched_files": [
+            "analysis/dynamics_report.md",
+            "figures/collatz_attractor_map.png"
+          ],
+          "tools": [
+            "matplotlib",
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781988497_2": {
+      "id": "task_dynamic_1781988497_2",
+      "goal": "Design and describe large-scale numerical verification, counterexample search algorithms, and high-performance checks.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "Define Verification Formalism",
+          "description": "Design the mathematical frameworks (pre/post conditions, invariants) for numerical verification targets. This involves specifying data types, precision requirements, and defining interfaces for core computational modules.",
+          "touched_files": [
+            "specifications/verification_formalisms.md",
+            "src/data_types.py",
+            "interface/check_interfaces.yaml"
+          ],
+          "tools": [
+            "edit_file",
+            "linter"
+          ]
+        },
+        {
+          "step_id": 2,
+          "name": "Implement Counterexample Search Engine",
+          "description": "Develop the core algorithm structure for automated counterexample searching. This includes integrating with specialized solvers (e.g., SMT/SAT solvers) to systematically explore state spaces and generate minimal failing inputs.",
+          "touched_files": [
+            "src/solver_wrapper.cpp",
+            "algorithms/counterexample_search.py",
+            "unit_tests/test_ex_search.py"
+          ],
+          "tools": [
+            "edit_file",
+            "pytest",
+            "cmake"
+          ]
+        },
+        {
+          "step_id": 3,
+          "name": "Design High-Performance Optimization Layer",
+          "description": "Develop modules for scaling checks to large inputs. This includes implementing parallel execution strategies (e.g., thread pooling), resource profiling integration, and managing memory overhead across concurrent verification runs.",
+          "touched_files": [
+            "src/parallel_execution_manager.cpp",
+            "optimization/profiler_hooks.py",
+            "docs/performance_notes.md"
+          ],
+          "tools": [
+            "edit_file",
+            "gprof",
+            "openmp"
+          ]
+        },
+        {
+          "step_id": 4,
+          "name": "Synthesize Design Documentation and Methodology",
+          "description": "Consolidate the designs from Steps 1-3 into a cohesive technical report. This step focuses on describing the overall architecture, complexity analysis (time/space), usage guidelines, and limitations of the entire verification suite.",
+          "touched_files": [
+            "documentation/design_report.pdf",
+            "README.md"
+          ],
+          "tools": [
+            "edit_file",
+            "sphinx"
+          ]
+        }
+      ],
+      "is_dynamic": true
+    },
+    "task_dynamic_1781988497_3": {
+      "id": "task_dynamic_1781988497_3",
+      "goal": "Use probabilistic and analytic heuristics (expected drift of log n, density arguments) to show why a counterexample is highly unlikely.",
+      "steps": [
+        {
+          "step_id": 1,
+          "name": "General Execution",
+          "description": "Perform tasks for: Use probabilistic and analytic heuristics (expected drift of log n, density arguments) to show why a counterexample is highly unlikely.",
+          "touched_files": [
+            "src/agent_004_output.md"
+          ],
+          "tools": [
+            "edit_file"
+          ]
+        }
+      ],
+      "is_dynamic": true
     }
   }
 }

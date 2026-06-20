@@ -130,17 +130,25 @@ function render() {
     // Toggle consolidated init modal / overlay
     const initOverlay = document.getElementById('init-overlay');
     if (initOverlay) {
-        const showInit = (SwarmState.agents.length === 0 || UIState.initModalOpen);
+        const showInit = ((!SwarmState.swarm_running && SwarmState.agents.length === 0) || UIState.initModalOpen);
         initOverlay.style.display = showInit ? 'flex' : 'none';
         
         // If it's shown, render designer agents
         if (showInit) {
             renderDesignerAgents();
+            const providerSelect = document.getElementById('init-provider');
+            if (providerSelect && SwarmState.llm_provider) {
+                providerSelect.value = SwarmState.llm_provider;
+            }
+            const autoApproveCheckbox = document.getElementById('init-auto-approve');
+            if (autoApproveCheckbox) {
+                autoApproveCheckbox.checked = !!SwarmState.auto_approve_spawns;
+            }
         }
 
         const closeBtn = document.getElementById('init-close-btn');
         if (closeBtn) {
-            closeBtn.style.display = (SwarmState.agents.length > 0) ? 'block' : 'none';
+            closeBtn.style.display = (SwarmState.swarm_running || SwarmState.agents.length > 0) ? 'block' : 'none';
         }
     }
 }
@@ -272,6 +280,7 @@ function statusLabel(status) {
         dead: '✕ Dead',
         syncing: '⟳ Syncing',
         pending_termination: '⚠ Blocked',
+        awaiting_child: '⧖ Awaiting child',
     };
     return labels[status] || status;
 }
@@ -1106,7 +1115,8 @@ function renderSwarmMap(container) {
         const needsInput = SwarmState.pending_spawns.some(s => s.agent_id === agent.id) ||
                            SwarmState.pending_blockers.some(b => b.agent_id === agent.id) ||
                            agent.status === 'pending_termination' ||
-                           agent.status === 'syncing';
+                           agent.status === 'syncing' ||
+                           agent.status === 'awaiting_child';
         const lowBudget = budgetPctCluster > 90;
 
         svgHtml += `
@@ -1160,6 +1170,9 @@ function renderSwarmMap(container) {
             nodeG.querySelector('.cluster-node-circle').classList.add('node--selected');
             renderClusterSidebar(agentId, document.getElementById('cluster-sidebar-content'));
             render();
+        } else {
+            UIState.selectedAgentId = null;
+            render();
         }
     });
 
@@ -1179,13 +1192,23 @@ function renderSwarmMap(container) {
 
 function renderStage(container) {
     if (SwarmState.agents.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state__icon">🗺️</div>
-                <div class="empty-state__title">No Active Swarm</div>
-                <div class="empty-state__desc">Launch a new swarm to visualize task network map.</div>
-            </div>
-        `;
+        if (SwarmState.swarm_running) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state__icon">🐝</div>
+                    <div class="empty-state__title">Decomposing Goals...</div>
+                    <div class="empty-state__desc">The swarm is initializing and planning steps. Please wait...</div>
+                </div>
+            `;
+        } else {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state__icon">🗺️</div>
+                    <div class="empty-state__title">No Active Swarm</div>
+                    <div class="empty-state__desc">Launch a new swarm to visualize task network map.</div>
+                </div>
+            `;
+        }
         return;
     }
     const n = SwarmState.agents.length;
@@ -1196,9 +1219,12 @@ function renderStage(container) {
     container.innerHTML = `
         <div class="stage" style="display:flex; flex-direction:column; height:100%;">
             <div class="stage__toolbar" style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border-bottom:1px solid var(--border-secondary); background:var(--bg-secondary); flex-shrink:0;">
-                <div class="seg" style="display:inline-flex; border:1px solid var(--border-primary); border-radius:var(--radius-sm); overflow:hidden;">
-                    <button class="seg__btn ${view === 'map' ? 'seg__btn--on' : ''}" data-action="toggle-stage" data-stage="map" style="font-size:0.75rem; padding:4px 12px; background:${view === 'map' ? 'var(--accent-blue)' : 'var(--bg-tertiary)'}; color:${view === 'map' ? '#fff' : 'var(--text-secondary)'}; border:none; cursor:pointer;">◆ Map</button>
-                    <button class="seg__btn ${view === 'timeline' ? 'seg__btn--on' : ''}" data-action="toggle-stage" data-stage="timeline" style="font-size:0.75rem; padding:4px 12px; background:${view === 'timeline' ? 'var(--accent-blue)' : 'var(--bg-tertiary)'}; color:${view === 'timeline' ? '#fff' : 'var(--text-secondary)'}; border:none; cursor:pointer;">💬 Timeline</button>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <div class="seg" style="display:inline-flex; border:1px solid var(--border-primary); border-radius:var(--radius-sm); overflow:hidden;">
+                        <button class="seg__btn ${view === 'map' ? 'seg__btn--on' : ''}" data-action="toggle-stage" data-stage="map" style="font-size:0.75rem; padding:4px 12px; background:${view === 'map' ? 'var(--accent-blue)' : 'var(--bg-tertiary)'}; color:${view === 'map' ? '#fff' : 'var(--text-secondary)'}; border:none; cursor:pointer;">◆ Map</button>
+                        <button class="seg__btn ${view === 'timeline' ? 'seg__btn--on' : ''}" data-action="toggle-stage" data-stage="timeline" style="font-size:0.75rem; padding:4px 12px; background:${view === 'timeline' ? 'var(--accent-blue)' : 'var(--bg-tertiary)'}; color:${view === 'timeline' ? '#fff' : 'var(--text-secondary)'}; border:none; cursor:pointer;">💬 Timeline</button>
+                    </div>
+                    ${UIState.selectedAgentId ? `<button class="btn btn--sm" data-action="deselect-agent" style="font-size:0.7rem; padding:2px 8px; border:1px solid var(--border-primary); border-radius:var(--radius-sm); cursor:pointer; background:var(--bg-tertiary); color:var(--text-secondary);">✕ Show all agents</button>` : ''}
                 </div>
                 <span class="stage__status" style="font-size:0.75rem; color:var(--text-secondary);">${SwarmState.swarm_running ? '<span style="color:var(--accent-green);">●</span> Swarm optimal' : '<span style="color:var(--text-muted);">●</span> Swarm idle'} · ${n} agent${n === 1 ? '' : 's'}</span>
             </div>
@@ -2452,6 +2478,10 @@ document.addEventListener('click', (e) => {
             UIState.workspaceData = null;
             render();
             break;
+        case 'deselect-agent':
+            UIState.selectedAgentId = null;
+            render();
+            break;
         case 'edit-agent':
             e.stopPropagation();
             openEditPanel(target.dataset.agentId);
@@ -2586,6 +2616,18 @@ document.addEventListener('change', (e) => {
     }
 });
 
+// Document-level Esc key listener to clear agent selection
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+    if (UIState.inspectorOpen) return;
+    if (UIState.selectedAgentId !== null) {
+        UIState.selectedAgentId = null;
+        render();
+    }
+});
+
 // Command bar (Enter key)
 document.getElementById('command-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -2619,6 +2661,7 @@ document.getElementById('command-input').addEventListener('keydown', (e) => {
         if (input.startsWith('/clean')) {
             const parts = input.split(/\s+/);
             const target = parts[1] || 'all';
+            if (target === 'all' && !confirm('This will clean ALL swarm state. Continue?')) return;
             apiPost('/api/clean', { target }).then(r => {
                 showToast(r.success ? `Cleaned: ${(r.cleaned || []).join(', ')}` : 'Failed', r.success ? 'success' : 'error');
             });
@@ -2724,6 +2767,7 @@ async function initLaunch() {
     const goal = document.getElementById('init-goal').value.trim();
     const provider = document.getElementById('init-provider').value;
     const budget = parseInt(document.getElementById('init-budget').value) || 20000;
+    const autoApprove = document.getElementById('init-auto-approve')?.checked || false;
 
     if (!goal) {
         showToast('Please enter a task prompt to initialize the swarm', 'error');
@@ -2739,7 +2783,7 @@ async function initLaunch() {
     }));
 
     showToast('Configuring LLM provider...', 'info');
-    await apiPost('/api/config', { llm_provider: provider });
+    await apiPost('/api/config', { llm_provider: provider, auto_approve_spawns: autoApprove });
 
     showToast('Initializing swarm task...', 'info');
     const result = await apiPost('/api/run', { goal, agents, budget });

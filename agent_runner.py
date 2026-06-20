@@ -861,6 +861,173 @@ class AgentRunner:
             passed, output = self.run_verification(verification_cmd)
         return passed, attempts, output
 
+    def has_unresolved_spawn(self):
+        sr = self.state.get("spawn_request") or {}
+        if sr.get("status") in ("pending", "approved"):
+            return True
+        for child_id in self.state.get("children", []):
+            child = load_json(os.path.join(AGENTS_DIR, f"agent_{child_id}.json"))
+            if child and child.get("status") not in ("completed", "dead"):
+                return True
+        return False
+
+    def finalize_or_await(self):
+        """Complete, unless a spawned child is still unresolved — then await it."""
+        if self.has_unresolved_spawn():
+            if self.state.get("status") != "awaiting_child":
+                self.state["status"] = "awaiting_child"
+                self.add_thought_trace(
+                    "Finished my own steps but a spawned child is unresolved. "
+                    "Holding completion to check in on it.", "evaluating")
+                save_json(self.state_file, self.state)
+            return False
+        self.state["status"] = "completed"
+        self.state["progress"] = 100
+        save_json(self.state_file, self.state)
+        return True
+
+    def check_in_on_children(self):
+        if not self.has_unresolved_spawn():
+            self.ingest_child_outputs()
+            self.finalize_or_await()
+            if self.state.get("status") == "completed":
+                self.save_memory_episode()
+            return
+
+        iters = self.state.get("await_iters", 0) + 1
+        self.state["await_iters"] = iters
+        
+        MAX_AWAIT_ITERS = 20
+        if iters > MAX_AWAIT_ITERS:
+            self.add_thought_trace("Waited too long for child result; finalizing without it.", "decision")
+            self.ingest_child_outputs(partial=True)
+            self.state["status"] = "completed"
+            self.state["progress"] = 100
+            save_json(self.state_file, self.state)
+            self.save_memory_episode()
+            return
+
+        decision = self._decide_wait_or_proceed()
+        if decision == "PROCEED":
+            self.add_thought_trace("Child result not worth waiting for; finalizing now.", "decision")
+            self.ingest_child_outputs(partial=True)
+            self.state["status"] = "completed"
+            self.state["progress"] = 100
+            save_json(self.state_file, self.state)
+            self.save_memory_episode()
+        else:
+            self.add_thought_trace("Decided to keep waiting for the child's result.", "evaluating")
+            save_json(self.state_file, self.state)
+            time.sleep(self.step_delay)
+
+    def _decide_wait_or_proceed(self):
+        """Query LLM (or rule fallback) to decide whether to wait for child agent(s) or proceed/finalize."""
+        children_info = []
+        for child_id in self.state.get("children", []):
+            child = load_json(os.path.join(AGENTS_DIR, f"agent_{child_id}.json"))
+            if child:
+                children_info.append({
+                    "id": child_id,
+                    "goal": child.get("goal", ""),
+                    "status": child.get("status", ""),
+                    "progress": child.get("progress", 0)
+                })
+        
+        provider = self.llm_provider
+        if not provider:
+            if os.environ.get("GEMINI_API_KEY"):
+                provider = "gemini"
+            elif is_ollama_running():
+                provider = "ollama"
+            else:
+                provider = "rules"
+                
+        if provider in ["gemini", "ollama"] and children_info:
+            prompt = (
+                f"You are Proximity Swarm Agent {self.agent_id} working on goal: '{self.state.get('goal', '')}'.\n"
+                f"You have finished executing your own steps but are waiting for child agent(s) to finish.\n"
+                f"Here is the status of your child agent(s):\n"
+                f"{json.dumps(children_info, indent=2)}\n\n"
+                f"Decide whether you should continue waiting for the children to complete ('WAIT') or "
+                f"proceed and finalize without waiting any longer ('PROCEED').\n"
+                f"Respond strictly in JSON with a single key 'decision' whose value is either 'WAIT' or 'PROCEED'."
+            )
+            try:
+                res = None
+                if provider == "gemini":
+                    res = call_gemini_api(prompt)
+                else:
+                    res = call_ollama_api(prompt, model=self.ollama_model)
+                if res and "decision" in res:
+                    dec = res["decision"].strip().upper()
+                    if dec in ["WAIT", "PROCEED"]:
+                        return dec
+            except Exception as ex:
+                print(f"  [Wait/Proceed Decision LLM Error]: {ex}")
+                
+        iters = self.state.get("await_iters", 0)
+        any_child_running = False
+        for c in children_info:
+            if c["status"] not in ["completed", "dead"] and c["progress"] < 100:
+                any_child_running = True
+                break
+        if any_child_running and iters < 8:
+            return "WAIT"
+        return "PROCEED"
+
+    def ingest_child_outputs(self, partial=False):
+        """Finds completed or in-progress child agent workspace files and appends them to a results summary file in parent's workspace."""
+        parent_results_file = os.path.join(self.workspace_dir, "child_results.md")
+        
+        existing_content = ""
+        if os.path.exists(parent_results_file):
+            try:
+                with open(parent_results_file, 'r') as fh:
+                    existing_content = fh.read()
+            except Exception:
+                pass
+                
+        new_sections = []
+        for child_id in self.state.get("children", []):
+            child_ws = os.path.join(WORKSPACES_DIR, f"agent_{child_id}")
+            child_json_path = os.path.join(AGENTS_DIR, f"agent_{child_id}.json")
+            child_data = load_json(child_json_path) or {}
+            
+            ingested_marker = f"<!-- ingested:{child_id} -->"
+            if ingested_marker in existing_content and not partial:
+                continue
+                
+            child_files_summary = ""
+            if os.path.exists(child_ws):
+                for root, dirs, files in os.walk(child_ws):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(file_path, child_ws)
+                        if rel_path.startswith(".") or rel_path.endswith(".log"):
+                            continue
+                        try:
+                            with open(file_path, 'r') as fh:
+                                content = fh.read()
+                            child_files_summary += f"### File: `{rel_path}`\n\n{content}\n\n"
+                        except Exception:
+                            pass
+                            
+            if child_files_summary:
+                header = f"\n\n## Results from Child Agent {child_id} (Goal: '{child_data.get('goal', '')}')\n"
+                if not partial:
+                    header += f"{ingested_marker}\n"
+                new_sections.append(header + child_files_summary)
+                self.add_thought_trace(f"Ingested results from child {child_id}.", "info")
+                print(f"  [Ingestion] Ingested results from child Agent {child_id} workspace.")
+                
+        if new_sections:
+            try:
+                with open(parent_results_file, 'a') as fh:
+                    for section in new_sections:
+                        fh.write(section)
+            except Exception as e:
+                print(f"  [Ingestion Error] Failed to write results to parent workspace: {e}")
+
     def execute_step(self):
         self.state = load_json(self.state_file)
         
@@ -884,6 +1051,11 @@ class AgentRunner:
         if self.state["status"] == "syncing":
             print(f"\n[SYNC REQUIRED] Agent {self.agent_id} has been PAUSED. Starting Negotiation Skill...")
             self.perform_negotiation()
+            return
+
+        if self.state["status"] == "awaiting_child":
+            print(f"\n[PAUSED] Agent {self.agent_id} is awaiting child agent resolution...")
+            self.check_in_on_children()
             return
 
         # 1. Process pending operator chat messages (Pivot / Add Context Decision Loop)
@@ -971,8 +1143,7 @@ class AgentRunner:
         tasks_data = load_json(MOCK_TASKS_FILE)
         if not tasks_data or task_id not in tasks_data["tasks"]:
             print(f"Error: Task data missing for task {task_id}.")
-            self.state["status"] = "completed"
-            save_json(self.state_file, self.state)
+            self.finalize_or_await()
             return
             
         task = tasks_data["tasks"][task_id]
@@ -981,10 +1152,7 @@ class AgentRunner:
         
         if completed_count >= len(steps):
             print(f"Agent {self.agent_id} has completed all steps of Task {task_id}.")
-            self.state["status"] = "completed"
-            self.state["progress"] = 100
-            save_json(self.state_file, self.state)
-            self.save_memory_episode()
+            self.finalize_or_await()
             return
             
         current_step = steps[completed_count]
@@ -1309,7 +1477,7 @@ class AgentRunner:
                 "description": next_step["description"]
             }
         else:
-            self.state["status"] = "completed"
+            self.finalize_or_await()
             self.state["current_step"] = None
             
         # Check if supervisor updated our status during step execution (e.g. to syncing, pending_termination, or dead)
@@ -1779,8 +1947,14 @@ def main():
     print(f"Starting Agent {args.agent_id} runner...")
     for _ in range(args.steps):
         runner.execute_step()
-        if runner.state["status"] in ["completed", "dead"]:
+        if runner.state.get("status") in ["completed", "dead"]:
             break
+            
+    while runner.state.get("status") == "awaiting_child":
+        runner.execute_step()
+
+    if runner.state.get("status") == "completed":
+        runner.save_memory_episode()
 
 
 if __name__ == "__main__":

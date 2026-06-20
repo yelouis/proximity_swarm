@@ -299,6 +299,7 @@ a:hover { text-decoration: underline; }
 .agent-card--dead { border-left-color: var(--accent-red); }
 .agent-card--syncing { border-left-color: var(--accent-amber); }
 .agent-card--pending_termination { border-left-color: var(--accent-red); }
+.agent-card--awaiting_child { border-left-color: var(--accent-blue-light); }
 
 .agent-card__header {
     display: flex;
@@ -342,6 +343,10 @@ a:hover { text-decoration: underline; }
 .agent-card__status--pending_termination {
     background: var(--accent-red-dim);
     color: var(--accent-red);
+}
+.agent-card__status--awaiting_child {
+    background: var(--accent-blue-dim);
+    color: var(--accent-blue-light);
 }
 
 .agent-card__role {

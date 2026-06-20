@@ -96,7 +96,7 @@ def evaluate_sub_swarm_completion():
         print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
-def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000):
+def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False):
     """
     Launches a swarm dynamically, starting with initial_agents (list of dicts containing agent_id and task_id).
     Dynamically spawns runners for any children created during execution.
@@ -106,7 +106,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     print("\n" + "="*60)
     print(f"  STARTING PROXIMITY SWARM RUN")
     print(f"  Initial Agents: {len(initial_agents)} | Deconfliction: {deconflict} | Interactive: {interactive}")
-    print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s | Budget: {budget}")
+    print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s | Budget: {budget} | Auto-approve Spawns: {auto_approve_spawns}")
     print("="*60 + "\n")
     
     if not os.path.exists(orchestrator_file):
@@ -151,6 +151,8 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         monitor_cmd.append("--interactive")
     if budget:
         monitor_cmd.extend(["--budget", str(budget)])
+    if auto_approve_spawns:
+        monitor_cmd.append("--auto-approve-spawns")
     monitor_proc = subprocess.Popen(
         monitor_cmd, 
         stdout=subprocess.DEVNULL, 
@@ -329,8 +331,16 @@ def main():
     parser.add_argument("--personalities", help="Comma-separated list of agent personalities/roles to initialize")
     parser.add_argument("--agents-config", help="JSON string representing starting agent configurations")
     parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
+    parser.add_argument("--auto-approve-spawns", action="store_true", default=None, help="Bypass manual operator approval for spawn requests")
     args = parser.parse_args()
     
+    auto_approve_spawns = args.auto_approve_spawns
+    if auto_approve_spawns is None:
+        if args.agents_config:
+            auto_approve_spawns = False
+        else:
+            auto_approve_spawns = True
+
     if args.run_redundant:
         run_redundant_demo(
             interactive=args.interactive, 
@@ -354,7 +364,8 @@ def main():
             llm_provider=args.llm_provider,
             ollama_model=args.ollama_model,
             step_delay=args.step_delay,
-            budget=args.budget
+            budget=args.budget,
+            auto_approve_spawns=auto_approve_spawns
         )
     elif args.task_id:
         personalities = []
@@ -376,7 +387,8 @@ def main():
             llm_provider=args.llm_provider,
             ollama_model=args.ollama_model,
             step_delay=args.step_delay,
-            budget=args.budget
+            budget=args.budget,
+            auto_approve_spawns=auto_approve_spawns
         )
     else:
         parser.print_help()
