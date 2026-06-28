@@ -1,8 +1,8 @@
 # Proximity Swarm
 
-Proximity Swarm is an agentic framework designed to coordinate a swarm of autonomous agents working on complex tasks. It applies cellular-automata-style rules (inspired by Conway's Game of Life) and semantic spatial proximity to manage resource consumption, accelerate task execution, and share learnings dynamically.
+Proximity Swarm is a **research harness** that takes *any* small, open-source LLM and amplifies its ability to carry a long chain of logic — proofs, deep research, multi-step engineering — by running it not as one model but as a coordinated **team** of single-step agents. Each agent works one atomic **logic step** at a time, and the swarm separates the hard, creative job of *proposing* a step from the cheap, reliable job of *validating* it. Agents sense each other in idea- and resource-space (**proximity**) so they dedupe overlapping work and deliberately diverge onto different approaches, like a research team. The combined, validated steps assemble into a shared **logic graph** — the answer, and a legible map of every idea that was explored.
 
-For a detailed breakdown of the concept, architecture, and implementation details, please see the [Technical Design Document](designs/design_doc.md). The web dashboard's design is specified in [designs/ui_design_document.md](designs/ui_design_document.md).
+For the concept, architecture, and the propose/validate thesis, see the [Technical Design Document](designs/design_doc.md). The harness is headless and scriptable; the optional observability dashboard is specified in [designs/harness_design_document.md](designs/harness_design_document.md).
 
 ## The Analogy: Git for LLM Trajectories
 

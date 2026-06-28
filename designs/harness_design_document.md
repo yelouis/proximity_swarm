@@ -111,6 +111,34 @@ When `agents.length === 0`, a modal prompts to define the root problem. Includes
 | Quota runs low (SSE) | agent budget | Target node gets an **orange ring** (prune candidate). |
 | Collision detected (SSE) | `collisions[]` | Dashed redundancy link + ring on Tree; Judge begins evaluation. |
 
+### 5.1 Resolved design decisions & rationale
+
+*(Folded in from the now-removed `simplified_ui_design.md`; this is the authoritative home for the
+information-architecture rationale.)*
+
+**Why this shape.** The earlier dashboard exposed nine always-visible navigation targets (7 center
+tabs + 2 right-panel tabs) plus several redundant doors into the same data (Workspace vs. Editor;
+Overview vs. Map vs. sidebar). The harness collapses that into **3 persistent zones + 1 center
+toggle + 2 on-demand drawers**, on the principle that the day-to-day job is "watch the logic search,
+steer it, read the Judge's evaluations" — not operate a control panel. Selection is the spine: one
+client-side `selectedAgentId` propagates to the tree, the Judge's Feed, and the inspector, so the
+same node is never re-picked in four places.
+
+**Decisions (locked).**
+- **Default stage view:** **Exploration Tree when `agents.length > 1`, Timeline when exactly one
+  agent.** Tree node rings double as operator-attention cues (blue = needs input, orange = prune
+  candidate).
+- **Inspector trigger:** **single-click = focus** (highlights node, populates Judge's Feed);
+  **double-click / details icon = open Inspector.** The inspector never pops on a casual click.
+- **Compute quota control:** **segmented presets (Small / Medium / Large)** in the Init modal, with
+  an **"Advanced ▸ exact tokens"** reveal. Default token mapping: **5,000 / 20,000 / 50,000** (the
+  global `session_budget` cap; confirm against `getMaxLeafTokens()` at build time).
+- **Empty state:** when `agents.length === 0`, the three zones sit dimmed and the single
+  **"Initialize Swarm Task"** modal is shown; the agent designer is an expandable section *inside*
+  that one modal (no separate launch modal).
+- **Branding:** **Proximity Swarm V3**. Flat gray surfaces, minimal radius, VS Code palette tokens
+  already in `static/styles.css`.
+
 ---
 
 ## 6. Backend integration (REST endpoints)

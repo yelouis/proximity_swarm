@@ -2,9 +2,9 @@
 
 > **Audience:** an autonomous LLM test executor (browser-automation capable) that will
 > drive the web dashboard and validate it.
-> **Companion docs:** [`ui_design_document.md`](ui_design_document.md) (authoritative UI spec),
-> [`simplified_ui_design.md`](simplified_ui_design.md) (IA rationale), [`design_doc.md`](design_doc.md)
-> (backend/feature spec).
+> **Companion docs:** [`harness_design_document.md`](harness_design_document.md) (authoritative UI
+> spec; IA rationale in its §5.1), [`design_doc.md`](design_doc.md) (backend/feature spec),
+> [`implementation_plan.md`](implementation_plan.md) (how to build the harness).
 
 ---
 
@@ -67,7 +67,7 @@ that one when finished.
 - **For all "idea exploration" journeys (1, 2, 3, 5, 6): use `ollama`.** It produces real LLM
   thought traces, real spawn decisions, real generated files, and real negotiation text — which
   is exactly what the map/timeline must surface. The model `gemma4:latest` is available locally.
-- The **Init modal's provider dropdown only offers `Ollama` and `Gemini`** (`#init-provider`).
+- The **Init modal's provider dropdown only offers local providers like `Ollama` and `MLX`** (`#init-provider`).
   Selecting `Ollama` is correct. (Goal decomposition always calls local Ollama regardless.)
 - A **deterministic, no-LLM variant** for pure UI-plumbing smoke tests is in
   [Appendix B](#appendix-b--fast-deterministic-smoke-variant) — use it only to validate wiring,
@@ -175,7 +175,7 @@ The app uses **event delegation on `data-action`**. To "click X," find the eleme
 ### Init modal
 | Purpose | Selector / action |
 |---|---|
-| Overlay / goal / provider | `#init-overlay`, `#init-goal`, `#init-provider` (`ollama`/`gemini`) |
+| Overlay / goal / provider | `#init-overlay`, `#init-goal`, `#init-provider` (`ollama`/`mlx`) |
 | Budget preset | `data-action="set-budget-preset" data-preset="small\|medium\|large" data-value="5000\|20000\|50000"` |
 | Exact budget (advanced) | `#init-budget` |
 | Add / edit / remove designer agent | `add-designer-agent`; `update-designer-role`/`update-designer-goal` with `data-index`; `remove-designer-agent` |

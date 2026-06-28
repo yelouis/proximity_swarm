@@ -2,7 +2,27 @@
 
 Proximity Swarm is a research harness that coordinates a swarm of simple, open-source LLMs to collaboratively solve complex multistep logic problems (e.g., mathematical proofs, deep research). It treats individual LLM agents as "logic processors" that work through a problem by processing and validating one logic step at a time. By applying cellular-automata-style rules and semantic spatial proximity, it ensures agents are aware of each other's logical exploration. If they drift into similar logic paths, they share information or merge to avoid redundant compute, while continuously exploring divergent ideas like a highly collaborative research team.
 
-This document is the **backend / system spec** (orchestration, agents, coordination, learning, and the terminal interface). The **visual dashboard** has its own spec in [`harness_design_document.md`](harness_design_document.md).
+This document is the **backend / system spec** (orchestration, agents, coordination, learning, and the terminal interface). The **visual dashboard** has its own spec in [`harness_design_document.md`](harness_design_document.md), and the **step-by-step build plan** (gap analysis, phases, data model, file map) is in [`implementation_plan.md`](implementation_plan.md).
+
+---
+
+## 0. Core Thesis: Atomic Steps & the Propose/Validate Split
+
+The bet is that you do not need a *stronger* model to carry a hard chain of logic — you need a better *process* around a weak one. A small, open-source model loses the thread over a long proof or a multi-file change, and its errors **compound**: one bad step poisons everything downstream. Three ideas turn a crowd of weak models into a team that doesn't:
+
+1. **Decompose into atomic logic steps.** A weak model is unreliable over twenty steps but usually competent at *one*: "given these premises, derive this single conclusion." Sizing each agent's task to a single logic step keeps every call inside the model's competence, so the long-horizon weakness is never exercised.
+
+2. **Separate *proposing* a step from *validating* it.** Coming up with the right next step is creative, high-variance, and error-prone (a huge search space). *Checking* whether a proposed step is sound is cheap and reliable — apply the inference rule, run the test, re-derive the value numerically, or ask a stronger **Judge** model to evaluate just that one step. So the swarm divides the labor: **Proposer** agents generate candidate steps; **Validator/Judge** agents verify them before they enter the trusted graph. A weak proposer behind a strict validator beats a lone weak model doing both, because invalid steps are caught *before* they corrupt the chain. This propose/validate asymmetry is the core amplification mechanism — and the reason collaboration matters: building the proof and checking the proof are different jobs.
+
+3. **Coordinate like a team, not a crowd.** Running N copies of a model in parallel just re-derives the same things N times. **Proximity** (§5, §11) gives every agent peripheral awareness of what its peers are doing in idea-space and resource-space, so the swarm can *dedupe* (drift too close → stop, share, or merge) and *diverge* (work too isolated/novel → "hire" a subagent to open a new branch, §15). That is what makes it a research team exploring different approaches at once.
+
+**The shared artifact — the logic graph.** Everything above grows one structure: a directed graph of atomic steps. Each node holds a `claim`, its `justification`, the prior nodes it `depends_on`, a `status` (`proposed → under_review → validated` **or** `refuted` → Gravestone), and the `approach`/branch it belongs to. Premises are the roots; the goal (QED, or a passing acceptance test) is the sink; a **solution** is a fully *validated* path from premises to goal; competing **approaches** are live branches the team explores in parallel.
+
+**One mechanism, two personas.** Only the validation oracle changes. For a **researcher**, a node is a lemma and validation is checking the inference (rule application, symbolic/numeric re-derivation, or a stronger Judge). For a **coder**, a node is a code change and validation is running the test/type-check/build (the self-healing loop, §13). The coordination machinery is identical — that is why this is one harness, not two tools.
+
+**What success means.** Solving the problem is the aspiration, not the bar. A successful run produces a **legible map of the idea space**: which approaches were tried, how they branched, where they collided, and which steps were validated vs. refuted. A well-mapped dead end (a Gravestone with a reason) is valuable output even when the conjecture still stands.
+
+---
 
 ## Implementation status
 
@@ -94,7 +114,7 @@ Users can define custom roles and dedicated goals for starting agents:
 When the Proximity Engine detects two agents drifting too close (duplicating logic):
 1. **Rule-Based fallback**: Evaluates which agent has formulated a more complete step.
 2. **Interactive mode**: Prompts the user to manually resolve the collision.
-3. **The Judge**: A dedicated evaluation mechanism. The Judge evaluates the validity of the colliding logic steps and resolves the deadlock. The Judge defaults to the swarm's local model, but if a stronger reasoning model (e.g., Gemini 1.5 Pro, GPT-4) is available via API, the system automatically routes to it for high-fidelity evaluation.
+3. **The Judge**: A dedicated evaluation mechanism. The Judge evaluates the validity of the colliding logic steps and resolves the deadlock. The Judge utilizes the strongest available local reasoning model (e.g., `gemma-2-27b` running on the 64GB Mac Studio) for high-fidelity evaluation.
 
 ---
 
