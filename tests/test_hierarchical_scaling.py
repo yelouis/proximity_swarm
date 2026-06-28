@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-import unittest.mock
+from unittest.mock import patch, MagicMock
 import json
 import shutil
 import tempfile
@@ -190,6 +190,7 @@ class TestHierarchicalScaling(unittest.TestCase):
         collision_id = "001_002"
         collision_file = os.path.join(self.test_dir, "collisions", f"collision_{collision_id}.json")
         collision_data = {
+            "id": "001_002",
             "collision_id": collision_id,
             "status": "negotiating",
             "agent_a": {
@@ -262,8 +263,10 @@ class TestHierarchicalScaling(unittest.TestCase):
         runner.workspace_dir = self.test_dir
         runner.state_file = os.path.join(self.test_dir, "agents", "agent_001.json")
         
-        # Run negotiation, should kill_b (because A has progress 80 >= B's progress 40)
-        runner.perform_negotiation()
+        with patch("judge.resolve_collision") as mock_judge:
+            mock_judge.return_value = {"action": "kill_b", "reason": "Progress based"}
+            # Run negotiation, should kill_b
+            runner.perform_negotiation()
         
         # Verify Agent 001 inherits Agent 002's parent!
         # Fetch mock save calls

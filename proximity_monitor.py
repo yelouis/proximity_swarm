@@ -108,6 +108,10 @@ OLLAMA_MODEL = "gemma4:latest"
 
 PHASE_WEIGHTS = {
     "Planning": (0.8, 0.1, 0.1),
+    "Exploring": (0.4, 0.4, 0.2),
+    "Validating": (0.1, 0.6, 0.3),
+    "Synthesizing": (0.6, 0.3, 0.1),
+    # Legacy fallbacks
     "Coding": (0.4, 0.4, 0.2),
     "Debugging": (0.1, 0.6, 0.3),
     "Documentation": (0.6, 0.3, 0.1)
@@ -193,8 +197,24 @@ def calculate_proximity(agent1, agent2, corpus):
     Computes composite distance metric between two agents.
     Returns (distance, cosine_sim, file_jaccard, tool_jaccard)
     """
+    def _get_claim(agent):
+        node_id = agent.get("active_node_id")
+        if node_id:
+            try:
+                import logic_graph
+                node = logic_graph.get_node(node_id)
+                if node:
+                    return node.get("claim", "")
+            except Exception:
+                pass
+        return ""
+
     goal1 = agent1.get("goal", "") + " " + agent1.get("current_step", {}).get("description", "") if agent1.get("current_step") else agent1.get("goal", "")
+    goal1 += " " + _get_claim(agent1)
+    
     goal2 = agent2.get("goal", "") + " " + agent2.get("current_step", {}).get("description", "") if agent2.get("current_step") else agent2.get("goal", "")
+    goal2 += " " + _get_claim(agent2)
+    
     cosine_sim = calculate_tfidf_cosine_similarity(goal1, goal2, corpus)
     
     files1 = agent1.get("touched_files", [])
@@ -308,6 +328,9 @@ def handle_spawn_requests(agents):
             if agent.get("offset_suffix"):
                 child_agent["offset_suffix"] = agent["offset_suffix"]
                 
+            # Seed with a distinct approach for graph exploration
+            child_agent["approach"] = f"Approach_{child_id}"
+                
             # Inherit sub_swarm_id and register in orchestrator
             if agent.get("sub_swarm_id"):
                 child_agent["sub_swarm_id"] = agent["sub_swarm_id"]
@@ -389,6 +412,22 @@ def evaluate_consensus_gate(agents):
                 # Safe to terminate: another active agent is covering this branch
                 agent["status"] = "dead"
                 save_agent_state(agent)
+                
+                # Write gravestone for branch abandoned
+                try:
+                    import agent_runner
+                    tombstones_file = agent_runner.TOMBSTONES_FILE
+                    tombstones = agent_runner.load_json(tombstones_file) or {"pruned_agents": [], "dead_ends": [], "refuted_nodes": []}
+                    if "pruned_agents" not in tombstones:
+                        tombstones["pruned_agents"] = []
+                    tombstones["pruned_agents"].append({
+                        "agent_id": agent["id"],
+                        "approach": agent.get("approach"),
+                        "reason": f"Consensus approved termination, covered by {covering_agent_id}"
+                    })
+                    agent_runner.save_json(tombstones_file, tombstones)
+                except Exception:
+                    pass
                 logging.info(
                     f"[CONSENSUS APPROVED] Agent {agent['id']} termination approved. "
                     f"Branch covered by active Agent {covering_agent_id}."
@@ -452,6 +491,7 @@ def run_cascading_kills():
                         break
                 if all_parents_dead:
                     child["status"] = "dead"
+                    child["active_node_id"] = None
                     save_agent_state(child)
                     try:
                         import causal_tracer
@@ -533,65 +573,31 @@ def get_active_leaf_agents(active_agents):
     leaf_agents = [a for a in active_agents if a["id"] not in active_parent_ids]
     return leaf_agents
 
-
-def rank_leaf_agents_llm(leaf_agents, macro_goal, llm_model=OLLAMA_MODEL):
-    if not leaf_agents:
-        return []
-    
-    now = time.time()
-    def get_fallback_sort_key(agent):
-        progress = agent.get("progress", 0)
-        tokens = agent.get("output_tokens", 0)
-        last_updated = agent.get("last_updated", now)
-        inactivity = now - last_updated
-        return (progress, -tokens, -inactivity)
+def rank_leaf_agents_llm(leaf_agents, macro_goal):
+    """
+    Rank leaf agents based on their progress and activity.
+    Fallback heuristic: sort by progress (ascending), then by inactivity (ascending last_updated).
+    """
+    def heuristic_sort(a):
+        progress = a.get("progress", 0)
+        last_updated = a.get("last_updated", 0)
+        return (progress, last_updated)
         
-    fallback_ranking = sorted(leaf_agents, key=get_fallback_sort_key)
-    fallback_result = []
-    for a in fallback_ranking:
-        inactivity_duration = now - a.get("last_updated", now)
-        fallback_result.append({
-            "id": a["id"],
-            "reason": f"Heuristic ranking: progress is {a.get('progress', 0)}%, output tokens: {a.get('output_tokens', 0)}, inactive for {int(inactivity_duration)}s."
-        })
-        
-    if not is_ollama_running() and not os.environ.get("GEMINI_API_KEY"):
-        return fallback_result
-    agents_desc = []
-    for a in leaf_agents:
-        agents_desc.append(
-            f"- Agent {a['id']}: Goal='{a.get('goal')}', Role/Personality='{a.get('personality', 'Generalist')}', "
-            f"Progress={a.get('progress')}%, Output Tokens={a.get('output_tokens', 0)}"
-        )
-    agents_str = "\n".join(agents_desc)
-    prompt = (
-        f"You are the Swarm Supervisor coordinating a research swarm working on the macro goal: '{macro_goal}'.\n"
-        f"The active agent output token budget is exceeded, and we need to evaluate which active leaf agents are least productive "
-        f"or contributing the least to the overall macro goal.\n\n"
-        f"Here are the active leaf agents:\n{agents_str}\n\n"
-        f"Please rate and rank them from LEAST productive/contributing to MOST productive/contributing. "
-        f"Return strictly a JSON object with a single key 'ranked_agents' whose value is a list of objects. "
-        f"Each object must have keys:\n"
-        f"1. 'id' (string: the agent ID, e.g. '002')\n"
-        f"2. 'reason' (string: a concise, 1-sentence explanation of why this agent is ranked at this level)\n"
-    )
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if api_key:
-            res = call_gemini_api_local(prompt, api_key)
-        else:
-            res = call_ollama_api_local(prompt, llm_model)
-        if res and "ranked_agents" in res:
-            return res["ranked_agents"]
-    except Exception as e:
-        logging.warning(f"LLM ranking failed: {e}. Falling back to progress heuristic.")
-    return fallback_result
+    return sorted(leaf_agents, key=heuristic_sort)
 
 
-def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
+def monitor_loop(poll_interval=1.5, collision_threshold=0.5, graph_mode="graph"):
     """Main polling loop to calculate proximity and supervise swarm execution."""
     logging.info("V2 Proximity Supervisor started. Coordinating swarm coordinates...")
-    logging.info(f"Settings: Poll Interval = {poll_interval}s, Collision Threshold = {collision_threshold}")
+    logging.info(f"Settings: Poll Interval = {poll_interval}s, Collision Threshold = {collision_threshold}, Graph Mode = {graph_mode}")
+    
+    if graph_mode == "graph":
+        try:
+            import logic_graph
+            logic_graph.set_monitor(True)
+            logic_graph.init_graph()
+        except ImportError as e:
+            logging.error(f"Failed to load logic_graph: {e}")
     
     while True:
         try:
@@ -684,7 +690,13 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5):
                         })
                     
             if budget_exceeded:
-                ranked = rank_leaf_agents_llm(leafs, macro_goal, OLLAMA_MODEL)
+                import judge
+                judge_provider, judge_model = judge.select_judge_model(
+                    None, None,
+                    "ollama" if is_ollama_running() else "gemini" if os.environ.get("GEMINI_API_KEY") else "rules",
+                    OLLAMA_MODEL
+                )
+                ranked = judge.rank_branches(leafs, judge_provider, judge_model)
                 alert_data = {
                     "budget_exceeded": True,
                     "active_count": max_leaf_tokens,  # Holds max leaf output tokens for display
@@ -784,6 +796,7 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true", help="Enable terminal prompts to manually negotiate collisions")
     parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     parser.add_argument("--auto-approve-spawns", action="store_true", help="Bypass manual operator approval for spawn requests")
+    parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode")
     args = parser.parse_args()
     
     OLLAMA_MODEL = args.ollama_model
@@ -792,7 +805,7 @@ if __name__ == "__main__":
     AUTO_APPROVE_SPAWNS = args.auto_approve_spawns
     
     try:
-        monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold)
+        monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold, graph_mode=args.graph_mode)
     except KeyboardInterrupt:
         logging.info("Supervisor stopped by user.")
         sys.exit(0)

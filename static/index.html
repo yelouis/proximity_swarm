@@ -47,32 +47,30 @@
 
         <!-- ─── Far Left: Activity Bar (view switcher) ─── -->
         <nav class="activity-bar" id="activity-bar">
-            <button class="activity-bar__item" data-action="switch-tab" data-tab="overview" title="Overview">🗂️</button>
-            <button class="activity-bar__item activity-bar__item--active" data-action="switch-tab" data-tab="clusters" title="Swarm map">🗺️</button>
+            <!-- Phase 9: Activity bar uses Branches, Swarm Tree, Timeline, Search, Activity, Settings -->
+            <button class="activity-bar__item activity-bar__item--active" data-action="switch-tab" data-tab="clusters" title="Branches & Swarm Tree">🗺️</button>
             <button class="activity-bar__item" data-action="switch-tab" data-tab="logs" title="Logs">📜</button>
             <span class="activity-bar__spacer"></span>
         </nav>
 
-        <!-- ─── Left: Agent Sidebar ─── -->
+        <!-- ─── Left: Branches Rail ─── -->
         <section class="panel sidebar" id="agent-sidebar">
             <div class="panel__header">
-                <span class="panel__title">Agents</span>
+                <span class="panel__title">Branches</span>
                 <span class="panel__badge" id="agent-count">0</span>
             </div>
             <div class="panel__body" id="agent-list">
                 <div class="empty-state" id="agents-empty">
                     <div class="empty-state__icon">🤖</div>
-                    <div class="empty-state__title">No Agents Yet</div>
-                    <div class="empty-state__desc">Launch a new swarm to see agents appear here.</div>
+                    <div class="empty-state__title">No Active Branches</div>
+                    <div class="empty-state__desc">Launch a new swarm to explore logic paths.</div>
                 </div>
             </div>
         </section>
 
-        <!-- ─── Center: Main Viewport ─── -->
-        <section class="panel viewport" id="main-viewport" style="position: relative;">
-            <!-- Hidden tab anchor kept for the agent-chat view label (navigation moved to the activity bar) -->
-            <div id="agent-chat-tab" style="display: none;"></div>
-            <div class="viewport__content" id="viewport-content">
+        <!-- ─── Center: Main Viewport (Exploration Tree / Timeline) ─── -->
+        <section class="panel viewport" id="main-viewport" style="position: relative; overflow: hidden;">
+            <div class="viewport__content" id="viewport-content" style="height: 100%; width: 100%;">
                 <!-- Dynamic content rendered by JS -->
             </div>
             
@@ -87,11 +85,11 @@
                     <div class="init-card__body" style="display: flex; flex-direction: column; gap: var(--space-md);">
                         <div class="form-group" style="margin-bottom: 0;">
                             <label class="form-label" for="init-goal">Macro Goal / Task Prompt</label>
-                            <textarea class="form-input init-prompt-input" id="init-goal" placeholder="Enter a prompt to initialize your swarm... (e.g., Build a microservice for user authentication using FastAPI)"></textarea>
+                            <textarea class="form-input init-prompt-input" id="init-goal" placeholder="Enter a prompt to initialize your swarm... (e.g., Prove the Collatz Conjecture...)"></textarea>
                         </div>
                         <div class="init-settings-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
                             <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label" for="init-provider">LLM Provider</label>
+                                <label class="form-label" for="init-provider">LLM Provider (Swarm & Judge)</label>
                                 <select class="form-input" id="init-provider">
                                     <option value="ollama">Ollama</option>
                                     <option value="gemini">Gemini</option>
@@ -116,6 +114,16 @@
                             <input type="checkbox" id="init-auto-approve" style="cursor: pointer; width: 16px; height: 16px;">
                             <label class="form-label" for="init-auto-approve" style="margin-bottom: 0; cursor: pointer; user-select: none;">Auto-approve child agent spawns</label>
                         </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label" for="init-oracle-mode">Oracle Verification Mode (Phase 4)</label>
+                            <select class="form-input" id="init-oracle-mode">
+                                <option value="none">None (Logic exploration only)</option>
+                                <option value="shell">Code Execution (Shell)</option>
+                                <option value="numeric">Numeric (Python evaluate)</option>
+                                <option value="symbolic">Symbolic (SymPy)</option>
+                                <option value="checker_model">Checker LLM (LLM-as-Judge)</option>
+                            </select>
+                        </div>
                         <details style="margin-top: var(--space-sm); border-top: 1px solid var(--border-secondary); padding-top: var(--space-md);">
                             <summary style="cursor: pointer; font-size: 0.82rem; font-weight: 600; color: var(--text-bright); user-select: none; color: var(--accent-cyan);">Configure custom agents (optional)</summary>
                             <div style="margin-top: var(--space-sm);">
@@ -135,18 +143,16 @@
             </div>
         </section>
 
-        <!-- ─── Right: Workspace & Activity ─── -->
+        <!-- ─── Right: The Judge's Feed ─── -->
         <section class="panel alerts-panel" id="alerts-panel">
             <div class="panel__header">
-                <span class="panel__title">Code Editor</span>
-                <div id="right-tab-editor" style="display: none;"></div>
-                <div id="right-tab-activity" style="display: none;"></div>
-                <span id="alerts-count" style="display: none;">0</span>
+                <span class="panel__title">The Judge's Feed</span>
             </div>
             <div class="panel__body" id="alerts-list">
-                <!-- Code Editor or Swarm Activity rendered dynamically by JS -->
+                <!-- Judge Feed rendered dynamically by JS -->
             </div>
         </section>
+
 
     </main>
 
@@ -228,7 +234,7 @@
     <div class="inspector-tabs-container">
         <div class="inspector-tabs">
             <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="overview">Overview</button>
-            <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="budget">Budget</button>
+            <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="budget">Quotas</button>
             <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="trace">Trace</button>
             <button class="inspector-tab" data-action="switch-inspector-tab" data-tab="memory">Memory</button>
         </div>

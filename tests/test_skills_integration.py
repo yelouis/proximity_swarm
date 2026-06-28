@@ -124,7 +124,7 @@ class TestSkillsIntegration(unittest.TestCase):
         self.assertEqual(len(timestamp.split("-")), 3)
 
     def test_start_of_step_state_synchronization(self):
-        runner = AgentRunner(agent_id="001", task_id="task_test")
+        runner = AgentRunner(graph_mode="linear", agent_id="001", task_id="task_test")
         
         # Modify the state file on disk to simulate external changes or verifying starting step state is written
         # Make sure current_step is correctly initialized
@@ -156,7 +156,7 @@ class TestSkillsIntegration(unittest.TestCase):
         with open(agent_runner.TOMBSTONES_FILE, 'w') as f:
             json.dump([tombstone_data], f, indent=2)
             
-        runner = AgentRunner(agent_id="002", task_id="task_blocked")
+        runner = AgentRunner(graph_mode="linear", agent_id="002", task_id="task_blocked")
         
         # Run step. It should hit the absolute tombstone, fail to apply a workaround,
         # and transition to pending_termination without executing.
@@ -167,7 +167,7 @@ class TestSkillsIntegration(unittest.TestCase):
         self.assertEqual(state_on_disk["status"], "pending_termination")
 
     def test_tombstone_timestamp_in_iso_format(self):
-        runner = AgentRunner(agent_id="003", task_id="task_trap")
+        runner = AgentRunner(graph_mode="linear", agent_id="003", task_id="task_trap")
         
         # Run step. It should crash (is_trap is true) and register a tombstone
         runner.execute_step()
@@ -184,8 +184,8 @@ class TestSkillsIntegration(unittest.TestCase):
         self.assertIn("T", t["timestamp"])
 
     def test_negotiation_redundancy_resolution(self):
-        runner_a = AgentRunner(agent_id="004", task_id="task_test")
-        runner_b = AgentRunner(agent_id="005", task_id="task_test")
+        runner_a = AgentRunner(graph_mode="linear", agent_id="004", task_id="task_test")
+        runner_b = AgentRunner(graph_mode="linear", agent_id="005", task_id="task_test")
         
         # Advance runner_a progress to make it survivor
         runner_a.state["steps_completed"] = 1
@@ -201,12 +201,10 @@ class TestSkillsIntegration(unittest.TestCase):
             f.write("print('hello')")
             
         # Create collision file
-        collision_id = "004_005"
-        collision_file = os.path.join(agent_runner.COLLISIONS_DIR, f"collision_{collision_id}.json")
+        collision_id = "004_005"        # Create a mock collision file
+        collision_file = os.path.join(agent_runner.COLLISIONS_DIR, f"collision_004_005.json")
         collision_data = {
-            "collision_id": collision_id,
-            "timestamp": 12345.67,
-            "distance": 0.1,
+            "id": "collision_004_005",
             "similarity_metrics": {"goal_cosine": 0.9, "file_jaccard": 0.0, "tool_jaccard": 0.0},
             "agent_a": runner_a.state,
             "agent_b": runner_b.state,
@@ -220,7 +218,7 @@ class TestSkillsIntegration(unittest.TestCase):
         save_json(runner_b.state_file, runner_b.state)
         
         # Mock LLM negotiation to propose kill_b (since B has 0% and A has 50%)
-        with unittest.mock.patch("agent_runner.call_ollama_api", return_value={"action": "kill_b", "reason": "Redundant goals"}):
+        with unittest.mock.patch("judge.resolve_collision", return_value={"action": "kill_b", "reason": "Redundant goals"}):
             runner_b.execute_step()
             
         # Verify runner_b is pending_termination
@@ -239,8 +237,8 @@ class TestSkillsIntegration(unittest.TestCase):
         self.assertTrue(os.path.exists(shared_file))
 
     def test_negotiation_complementary_resolution_and_bypass(self):
-        runner_a = AgentRunner(agent_id="006", task_id="task_test")
-        runner_b = AgentRunner(agent_id="007", task_id="task_test")
+        runner_a = AgentRunner(graph_mode="linear", agent_id="006", task_id="task_test")
+        runner_b = AgentRunner(graph_mode="linear", agent_id="007", task_id="task_test")
         
         # runner_a has completed Step A
         runner_a.state["steps_completed"] = 1
@@ -290,7 +288,7 @@ class TestSkillsIntegration(unittest.TestCase):
         self.assertEqual(b_state["current_step"]["name"], "Step B")
 
     def test_evaluate_isolation_spawn(self):
-        runner = AgentRunner(agent_id="008", task_id="task_test")
+        runner = AgentRunner(graph_mode="linear", agent_id="008", task_id="task_test")
         
         # Trigger isolated spawn check
         # We need steps_completed = 5. Let's make a mock task with 6 steps so we can test steps_completed = 5
@@ -397,8 +395,8 @@ class TestSkillsIntegration(unittest.TestCase):
 
     def test_negotiation_step_review_mocked(self):
         # Set up a complementary negotiation scenario to test LLM review logic
-        runner_a = AgentRunner(agent_id="020", task_id="task_test")
-        runner_b = AgentRunner(agent_id="021", task_id="task_test")
+        runner_a = AgentRunner(graph_mode="linear", agent_id="020", task_id="task_test")
+        runner_b = AgentRunner(graph_mode="linear", agent_id="021", task_id="task_test")
         
         # agent_a has completed Step A
         runner_a.state["steps_completed"] = 1
@@ -430,9 +428,8 @@ class TestSkillsIntegration(unittest.TestCase):
         
         # Case 1: LLM says should_bypass = True
         with unittest.mock.patch("agent_runner.call_ollama_api") as mock_api:
-            # First call for keep_both negotiation outcome, second for LLM step review
+            # First LLM call for step review
             mock_api.side_effect = [
-                {"action": "keep_both", "reason": "Complementary tasks"},
                 {"should_bypass": True, "reason": "Verified generated files satisfy requirements"}
             ]
             # Override provider to force LLM review path
@@ -578,7 +575,7 @@ class TestSkillsIntegration(unittest.TestCase):
             self.assertTrue(pruned_tombstone.get("is_pruned"))
             
             # 5. Verify agent runner ignores pruned tombstone blockade
-            runner = AgentRunner(agent_id="002", task_id="task_test")
+            runner = AgentRunner(graph_mode="linear", agent_id="002", task_id="task_test")
             runner.state["status"] = "exploring"
             # Set touched files/tools to trigger match
             runner.state["touched_files"] = [pruned_tombstone["file_path"]]

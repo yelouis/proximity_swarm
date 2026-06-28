@@ -364,8 +364,15 @@ def get_full_state():
         "predefined_agents": server_state["predefined_agents"],
         "auto_approve_spawns": server_state.get("auto_approve_spawns", False),
         "state_hash": compute_state_hash(),
+        "graph": _get_graph_safely(),
     }
 
+def _get_graph_safely():
+    try:
+        import logic_graph
+        return logic_graph.to_artifact_json()
+    except Exception:
+        return {"nodes": {}, "validated_path": []}
 # ---------------------------------------------------------------------------
 # Swarm launch helpers (reuses supervisor.py logic)
 # ---------------------------------------------------------------------------
@@ -873,6 +880,12 @@ class SwarmRequestHandler(BaseHTTPRequestHandler):
             return self.send_json({"lines": get_log_tail(200)})
         if path == "/api/memory":
             return self.send_json(get_memory_episodes())
+        if path == "/api/graph":
+            try:
+                import logic_graph
+                return self.send_json(logic_graph.to_artifact_json())
+            except Exception as e:
+                return self.send_json({"error": str(e)}, 500)
         if path.startswith("/api/trace/"):
             agent_id = path.split("/api/trace/")[1]
             return self.send_json(get_trace_data(agent_id))

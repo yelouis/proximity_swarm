@@ -1,0 +1,283 @@
+import os
+import json
+import logging
+from agent_runner import save_json, load_json
+
+GRAPH_DIR = os.path.join(os.getcwd(), ".proximity_swarm", "graph")
+SNAPSHOT_FILE = os.path.join(GRAPH_DIR, "snapshot.json")
+
+_IS_MONITOR = False
+
+def set_monitor(is_monitor: bool):
+    global _IS_MONITOR
+    _IS_MONITOR = is_monitor
+
+def _guard_monitor(op_name):
+    if not _IS_MONITOR:
+        logging.error(f"[{op_name}] Structural operation called outside of monitor process.")
+        return False
+    return True
+
+def init_graph(run_dir=None):
+    os.makedirs(GRAPH_DIR, exist_ok=True)
+
+def _node_path(node_id):
+    return os.path.join(GRAPH_DIR, f"node_{node_id}.json")
+
+def add_node(node):
+    node_id = node.get("node_id")
+    if not node_id:
+        raise ValueError("node_id required")
+    save_json(_node_path(node_id), node)
+    return True
+
+def get_node(node_id):
+    return load_json(_node_path(node_id))
+
+def update_node(node_id, **fields):
+    node = get_node(node_id)
+    if not node:
+        return False
+    for k, v in fields.items():
+        node[k] = v
+    save_json(_node_path(node_id), node)
+    return True
+
+def _get_all_nodes():
+    nodes = {}
+    if not os.path.exists(GRAPH_DIR):
+        return nodes
+    for f in os.listdir(GRAPH_DIR):
+        if f.startswith("node_") and f.endswith(".json"):
+            data = load_json(os.path.join(GRAPH_DIR, f))
+            if data and "node_id" in data:
+                nodes[data["node_id"]] = data
+    return nodes
+
+def frontier():
+    nodes = _get_all_nodes()
+    frontier_ids = set()
+    for n in nodes.values():
+        if n.get("kind") == "goal":
+            deps = n.get("depends_on", [])
+            if not deps and n.get("status") not in ["validated", "refuted"]:
+                frontier_ids.add(n["node_id"])
+            else:
+                for dep_id in deps:
+                    dep_node = nodes.get(dep_id)
+                    if not dep_node or dep_node.get("status") not in ["validated", "refuted"]:
+                        frontier_ids.add(dep_id)
+    return [nodes[nid] for nid in frontier_ids if nid in nodes]
+
+def nodes_by_status(status):
+    nodes = _get_all_nodes()
+    return [n for n in nodes.values() if n.get("status") == status]
+
+def nodes_by_approach(approach):
+    nodes = _get_all_nodes()
+    return [n for n in nodes.values() if n.get("approach") == approach]
+
+def validated_path_to_goal():
+    nodes = _get_all_nodes()
+    goal_node = None
+    for n in nodes.values():
+        if n.get("kind") == "goal":
+            goal_node = n
+            break
+    if not goal_node:
+        return None
+        
+    def _is_validated(nid, visited):
+        if nid in visited:
+            return False
+        visited.add(nid)
+        node = nodes.get(nid)
+        if not node:
+            return False
+        if node.get("status") != "validated" and node.get("kind") not in ["premise", "goal"]:
+            return False
+        if node.get("kind") == "premise":
+            return True
+        if node.get("kind") != "goal":
+            oracle = node.get("oracle", {})
+            if oracle.get("type") == "none":
+                return False
+        for dep in node.get("depends_on", []):
+            if not _is_validated(dep, visited.copy()):
+                return False
+        return True
+        
+    if _is_validated(goal_node["node_id"], set()):
+        path = set()
+        def _collect(nid):
+            if nid in path:
+                return
+            path.add(nid)
+            for d in nodes.get(nid, {}).get("depends_on", []):
+                _collect(d)
+        _collect(goal_node["node_id"])
+        return list(path)
+    return None
+
+
+
+def merge_nodes(survivor_id, loser_ids):
+    if not _guard_monitor("merge_nodes"):
+        return False
+    nodes = _get_all_nodes()
+    if survivor_id not in nodes:
+        return False
+        
+    try:
+        import causal_tracer
+        for lid in loser_ids:
+            causal_tracer.log_merge(lid, survivor_id)
+    except Exception:
+        pass
+        
+    for n in nodes.values():
+        new_deps = []
+        changed = False
+        for d in n.get("depends_on", []):
+            if d in loser_ids:
+                new_deps.append(survivor_id)
+                changed = True
+            else:
+                new_deps.append(d)
+        if changed:
+            update_node(n["node_id"], depends_on=list(set(new_deps)))
+            
+    for lid in loser_ids:
+        if lid in nodes:
+            update_node(lid, status="refuted", kind="merged_loser")
+            
+    return True
+def reparent(node_id, new_deps):
+    if not _guard_monitor("reparent"):
+        return False
+    update_node(node_id, depends_on=new_deps)
+    return True
+
+def prune_branch(approach):
+    if not _guard_monitor("prune_branch"):
+        return False
+    nodes = _get_all_nodes()
+    for n in nodes.values():
+        if n.get("approach") == approach:
+            update_node(n["node_id"], status="refuted")
+    return True
+
+def validate_graph():
+    nodes = _get_all_nodes()
+    violations = []
+    goals = [n for n in nodes.values() if n.get("kind") == "goal"]
+    if len(goals) != 1:
+        violations.append(f"Expected 1 goal node, found {len(goals)}")
+    roots = [n for n in nodes.values() if n.get("kind") == "premise"]
+    if len(roots) < 1:
+        violations.append("Expected at least 1 premise node")
+        
+    for nid, n in nodes.items():
+        for dep in n.get("depends_on", []):
+            if dep not in nodes:
+                violations.append(f"Node {nid} has dangling dependency {dep}")
+        if n.get("status") not in ["proposed", "under_review", "validated", "refuted", None]:
+            violations.append(f"Node {nid} has illegal status {n.get('status')}")
+        oracle_type = n.get("oracle", {}).get("type")
+        if oracle_type not in ["shell", "numeric", "symbolic", "checker_model", "none", None]:
+            violations.append(f"Node {nid} has illegal oracle type {oracle_type}")
+        if n.get("status") == "validated":
+            for dep in n.get("depends_on", []):
+                dep_node = nodes.get(dep)
+                if dep_node and dep_node.get("status") == "refuted":
+                    violations.append(f"Validated node {nid} depends on refuted node {dep}")
+                    
+    def has_cycle(start_id, visited, stack):
+        visited.add(start_id)
+        stack.add(start_id)
+        for dep in nodes.get(start_id, {}).get("depends_on", []):
+            if dep not in visited:
+                if has_cycle(dep, visited, stack):
+                    return True
+            elif dep in stack:
+                return True
+        stack.remove(start_id)
+        return False
+        
+    visited_nodes = set()
+    for nid in nodes:
+        if nid not in visited_nodes:
+            if has_cycle(nid, visited_nodes, set()):
+                violations.append(f"Cycle detected involving node {nid}")
+                
+    try:
+        if os.path.exists(SNAPSHOT_FILE):
+            snap = load_json(SNAPSHOT_FILE)
+            if snap is None:
+                violations.append("Snapshot is corrupt")
+            else:
+                snap_nodes = snap.get("nodes", {})
+                for snid in snap_nodes:
+                    if snid not in nodes:
+                        violations.append(f"Snapshot contains node {snid} not in per-node files")
+    except Exception:
+        violations.append("Snapshot parsing failed")
+        
+    return violations
+
+def repair_graph():
+    if not _guard_monitor("repair_graph"):
+        return False
+    nodes = _get_all_nodes()
+    for nid, n in nodes.items():
+        deps = n.get("depends_on", [])
+        new_deps = [d for d in deps if d in nodes]
+        if len(new_deps) != len(deps):
+            update_node(nid, depends_on=new_deps)
+    try:
+        if os.path.exists(SNAPSHOT_FILE):
+            snap = load_json(SNAPSHOT_FILE)
+            if snap is None:
+                rebuild_snapshot()
+    except Exception:
+        rebuild_snapshot()
+    return True
+
+def rebuild_snapshot():
+    if not _guard_monitor("rebuild_snapshot"):
+        return False
+    nodes = _get_all_nodes()
+    snap = {"nodes": nodes}
+    save_json(SNAPSHOT_FILE, snap)
+    return True
+
+def to_mermaid():
+    nodes = _get_all_nodes()
+    lines = ["graph TD"]
+    for nid, n in nodes.items():
+        status = n.get("status", "unknown")
+        label = f"{nid}[{nid}: {str(n.get('claim', ''))[:20]}]"
+        lines.append(f"  {label}")
+        if status == "validated":
+            lines.append(f"  style {nid} fill:#a3e4d7")
+        elif status == "refuted":
+            lines.append(f"  style {nid} fill:#f5b7b1")
+        for dep in n.get("depends_on", []):
+            lines.append(f"  {dep} --> {nid}")
+    return "\n".join(lines)
+
+def to_artifact_json():
+    nodes = _get_all_nodes()
+    return {"nodes": nodes, "validated_path": validated_path_to_goal()}
+
+
+
+def similar_open_nodes(claim_text, threshold=0.8):
+    nodes = _get_all_nodes()
+    similar = []
+    for n in nodes.values():
+        if n.get("status") in ["proposed", "under_review", "exploring"]:
+            c = n.get("claim", "")
+            if claim_text.lower() == c.lower():
+                similar.append(n["node_id"])
+    return similar

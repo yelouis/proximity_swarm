@@ -81,6 +81,44 @@ class TestProximityMath(unittest.TestCase):
         self.assertEqual(file_jaccard, 1.0)
         self.assertEqual(tool_jaccard, 1.0)
 
+    def test_proximity_with_active_node_id(self):
+        import logic_graph
+        import tempfile
+        import shutil
+        
+        test_dir = tempfile.mkdtemp()
+        old_cwd = os.getcwd()
+        os.chdir(test_dir)
+        try:
+            logic_graph.GRAPH_DIR = os.path.join(test_dir, ".proximity_swarm", "graph")
+            logic_graph.init_graph()
+            logic_graph.add_node({
+                "node_id": "n1",
+                "claim": "Extract database connection string"
+            })
+            
+            agent1 = {
+                "goal": "Database logic",
+                "active_node_id": "n1"
+            }
+            agent2 = {
+                "goal": "Different logic",
+                "active_node_id": "n1"
+            }
+            
+            # Since they share the same active node, the claim "Extract database connection string" will be in both goals
+            corpus = [
+                "Database logic Extract database connection string",
+                "Different logic Extract database connection string"
+            ]
+            
+            distance, cosine_sim, _, _ = calculate_proximity(agent1, agent2, corpus)
+            # They share the claim so cosine sim should be non-zero
+            self.assertGreater(cosine_sim, 0.1)
+        finally:
+            os.chdir(old_cwd)
+            shutil.rmtree(test_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

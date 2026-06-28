@@ -122,6 +122,16 @@ def log_takeover(collision_id, survivor_id, loser_id, reasoning=None):
     add_edge(collision_node_id, f"agent_{survivor_id}", "takeover_survivor", {"reasoning": reasoning})
     add_edge(collision_node_id, f"agent_{loser_id}", "takeover_loser", {"reasoning": reasoning})
 
+def log_decision(agent_id, decision_type, metadata, result, reason):
+    decision_id = f"decision_{agent_id}_{int(time.time()*1000)}"
+    add_node(
+        decision_id,
+        "decision",
+        f"Judge {decision_type} ({result})",
+        {"metadata": metadata, "result": result, "reason": reason}
+    )
+    add_edge(f"agent_{agent_id}", decision_id, decision_type, {"result": result, "reason": reason})
+
 
 def log_state_transition(agent_id, old_status, new_status, details=None):
     add_edge(f"agent_{agent_id}", f"agent_{agent_id}", "state_transition", {
@@ -129,6 +139,29 @@ def log_state_transition(agent_id, old_status, new_status, details=None):
         "new_status": new_status,
         "details": details
     })
+
+
+def log_propose(agent_id, node_id, claim):
+    add_node(f"node_{node_id}", "logic_node", claim[:30] + "...")
+    add_edge(f"agent_{agent_id}", f"node_{node_id}", "propose", {"claim": claim})
+
+
+def log_validate(agent_id, node_id):
+    add_edge(f"agent_{agent_id}", f"node_{node_id}", "validate")
+
+
+def log_refute(agent_id, node_id):
+    add_edge(f"agent_{agent_id}", f"node_{node_id}", "refute")
+
+
+def log_share(agent_a_id, agent_b_id):
+    add_edge(f"agent_{agent_a_id}", f"agent_{agent_b_id}", "share")
+    add_edge(f"agent_{agent_b_id}", f"agent_{agent_a_id}", "share")
+
+
+def log_merge(loser_node_id, survivor_node_id):
+    add_edge(f"node_{loser_node_id}", f"node_{survivor_node_id}", "merge")
+
 
 
 def get_connected_component(start_node_id):

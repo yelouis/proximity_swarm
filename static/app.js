@@ -20,6 +20,7 @@ const SwarmState = {
     session_budget: 20000,
     predefined_agents: [],
     state_hash: '',
+    graph: { nodes: {}, validated_path: [] },
 };
 
 const UIState = {
@@ -290,87 +291,93 @@ function statusLabel(status) {
 // ---------------------------------------------------------------------------
 function renderAlertsPanel() {
     const list = document.getElementById('alerts-list');
-    const countBadge = document.getElementById('alerts-count');
-
-    const budgetAlert = SwarmState.budget_alert || {};
-    const budgetExceeded = budgetAlert.budget_exceeded || false;
-
-    let alertCount = SwarmState.pending_spawns.length + SwarmState.pending_blockers.length + SwarmState.collisions.length + (budgetExceeded ? 1 : 0);
-    if (countBadge) {
-        countBadge.textContent = alertCount;
-    }
-
     list.style.padding = '0';
     list.style.gap = '0';
 
     if (SwarmState.agents.length === 0) {
         list.innerHTML = `
             <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
-                <div class="empty-state__icon">📄</div>
-                <div class="empty-state__title">No Swarm Task Running</div>
-                <div class="empty-state__desc">Initialize the swarm to generate code and view workspace files here.</div>
+                <div class="empty-state__icon">⚖️</div>
+                <div class="empty-state__title">No Active Logic Node</div>
+                <div class="empty-state__desc">Select a node from the Exploration Tree to view the Judge's evaluations.</div>
             </div>
         `;
         return;
     }
 
-    const agentId = UIState.selectedWorkspaceAgent || SwarmState.agents[0].id;
-    
-    if (UIState.workspaceData && UIState.selectedWorkspaceAgent === agentId) {
-        const files = UIState.workspaceData.files || [];
-        const contents = UIState.workspaceData.contents || {};
-
-        if (files.length === 0) {
-            list.innerHTML = `
-                <div style="padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
-                    <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: var(--space-xs);">Agent Workspace</div>
-                    <select class="form-select" id="change-workspace-agent" style="width: 100%; padding: 2px 6px; font-size: 0.75rem;">
-                        ${SwarmState.agents.map(a => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>Agent ${a.id} (${escapeHtml(a.personality || 'Generalist')})</option>`).join('')}
-                    </select>
-                </div>
-                <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
-                    <div class="empty-state__icon">📄</div>
-                    <div class="empty-state__title">No Files Yet</div>
-                    <div class="empty-state__desc">Agent ${agentId} hasn't created any workspace files yet.</div>
-                </div>
-            `;
-        } else {
-            const selectedFile = UIState.selectedFile || files[0];
-            const content = contents[selectedFile] || '';
-            
-            const fileTabsHtml = files.map(f => {
-                const isActive = f === selectedFile;
-                return `<button class="editor-tab ${isActive ? 'editor-tab--active' : ''}" data-action="select-file" data-file="${escapeAttr(f)}">${escapeHtml(f)}</button>`;
-            }).join('');
-
-            const breadcrumb = `src › agent_${agentId} › ${selectedFile.split('/').join(' › ')}`;
-            const lines = content.split('\n');
-            const lineNumbersHtml = lines.map((_, idx) => `<div class="editor-line-number">${idx + 1}</div>`).join('');
-            const linesHtml = lines.map(line => `<div class="editor-code-line">${escapeHtml(line) || '&nbsp;'}</div>`).join('');
-
-            list.innerHTML = `
-                <div style="display: flex; flex-direction: column; height: 100%;">
-                    <div class="editor-tabs-container" style="display: flex; overflow-x: auto; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-secondary); flex-shrink: 0;">
-                        ${fileTabsHtml}
-                    </div>
-                    <div class="editor-breadcrumb" style="padding: 4px var(--space-md); background: var(--bg-secondary); border-bottom: 1px solid var(--border-secondary); font-size: 0.68rem; color: var(--text-secondary); flex-shrink: 0; font-family: var(--font-sans);">
-                        ${breadcrumb}
-                    </div>
-                    <div class="editor-body" style="flex: 1; display: flex; overflow: auto; background: var(--bg-primary); font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.5;">
-                        <div class="editor-line-numbers" style="padding: var(--space-sm) var(--space-xs); text-align: right; color: var(--text-muted); border-right: 1px solid var(--border-secondary); user-select: none; background: var(--bg-secondary); min-width: 30px; flex-shrink: 0;">
-                            ${lineNumbersHtml}
-                        </div>
-                        <div class="editor-code" style="padding: var(--space-sm) var(--space-md); color: var(--text-bright); white-space: pre; flex: 1; overflow: auto;">
-                            ${linesHtml}
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-    } else {
-        list.innerHTML = '<div style="text-align: center; padding: var(--space-xl);"><div class="skeleton skeleton--card"></div><div class="skeleton skeleton--card"></div></div>';
-        loadWorkspace(agentId);
+    const agentId = UIState.selectedAgentId;
+    if (!agentId) {
+        list.innerHTML = `
+            <div class="empty-state" style="padding: var(--space-lg); text-align: center; margin-top: var(--space-xl);">
+                <div class="empty-state__icon">⚖️</div>
+                <div class="empty-state__title">No Node Selected</div>
+                <div class="empty-state__desc">Select a node from the Exploration Tree to view the Judge's evaluations.</div>
+            </div>
+        `;
+        return;
     }
+
+    const agent = SwarmState.agents.find(a => a.id === agentId);
+    if (!agent) return;
+
+    let feedHtml = `<div style="padding: var(--space-md); border-bottom: 1px solid var(--border-secondary); background: var(--bg-secondary);">
+        <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: var(--space-xs);">Evaluation Stream: Node ${agent.id}</div>
+    </div>`;
+
+    // Try to get validation state from graph if available
+    let evaluationReason = 'Evaluating step constraints...';
+    let isValid = null;
+    if (SwarmState.graph && SwarmState.graph.nodes && SwarmState.graph.nodes[agent.id]) {
+        const node = SwarmState.graph.nodes[agent.id];
+        if (node.status === 'valid') {
+            isValid = true;
+            evaluationReason = node.judge_reason || 'Node logic validated against premises.';
+        } else if (node.status === 'invalid' || node.status === 'refuted') {
+            isValid = false;
+            evaluationReason = node.judge_reason || 'Node refuted by Oracle or Judge.';
+        }
+    }
+
+    // Mock representation of Judge Feed until full events stream in
+    if (isValid === true) {
+        feedHtml += `
+            <div style="padding: var(--space-md); margin: var(--space-md); border-radius: var(--radius-sm); background: rgba(46, 204, 113, 0.1); border: 1px solid rgba(46, 204, 113, 0.3);">
+                <div style="display: flex; gap: var(--space-sm); align-items: flex-start;">
+                    <div style="font-size: 1.2rem; color: var(--accent-green);">✓</div>
+                    <div>
+                        <div style="font-weight: 600; color: var(--accent-green); margin-bottom: var(--space-xs);">Valid Step</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">${escapeHtml(evaluationReason)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    } else if (isValid === false) {
+        feedHtml += `
+            <div style="padding: var(--space-md); margin: var(--space-md); border-radius: var(--radius-sm); background: rgba(231, 76, 60, 0.1); border: 1px solid rgba(231, 76, 60, 0.3);">
+                <div style="display: flex; gap: var(--space-sm); align-items: flex-start;">
+                    <div style="font-size: 1.2rem; color: var(--accent-red);">✗</div>
+                    <div>
+                        <div style="font-weight: 600; color: var(--accent-red); margin-bottom: var(--space-xs);">Invalid Step</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">${escapeHtml(evaluationReason)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    } else {
+         feedHtml += `
+            <div style="padding: var(--space-md); margin: var(--space-md); border-radius: var(--radius-sm); background: var(--bg-tertiary); border: 1px solid var(--border-primary);">
+                <div style="display: flex; gap: var(--space-sm); align-items: flex-start;">
+                    <div style="font-size: 1.2rem; color: var(--text-secondary);">⏳</div>
+                    <div>
+                        <div style="font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-xs);">Evaluating...</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">Waiting for Judge synthesis.</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    list.innerHTML = feedHtml;
 }
 
 function getMaxLeafTokens() {
@@ -877,12 +884,12 @@ function renderClusterSidebar(agentId, container) {
 }
 
 function renderSwarmMap(container) {
-    if (SwarmState.agents.length === 0) {
+    if (!SwarmState.graph || !SwarmState.graph.nodes || Object.keys(SwarmState.graph.nodes).length === 0) {
         container.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state__icon">🕸️</div>
                 <div class="empty-state__title">No Active Swarm</div>
-                <div class="empty-state__desc">Launch a new swarm to visualize agent task proximity clusters.</div>
+                <div class="empty-state__desc">Launch a new swarm to visualize the Logic Exploration Tree.</div>
             </div>
         `;
         return;
@@ -896,85 +903,83 @@ function renderSwarmMap(container) {
     container.innerHTML = `
         <div style="display: flex; flex-direction: column; height: 100%;">
             <div class="map-legend" style="display: flex; flex-wrap: wrap; gap: var(--space-md); padding: var(--space-sm) var(--space-xl); background: var(--bg-secondary); border-bottom: 1px solid var(--border-secondary); font-size: 0.72rem; color: var(--text-secondary); flex-shrink: 0;">
-                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green);"></span>Exploring</span>
                 <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);"></span>Idle</span>
-                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-blue-light);"></span>Completed</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green);"></span>Validating</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-orange);"></span>Syncing/Collision</span>
+                <span style="display: flex; align-items: center; gap: 4px; font-weight: bold; color: var(--accent-green);">✓ Validated</span>
+                <span style="display: flex; align-items: center; gap: 4px;">💀 Gravestone</span>
                 <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-blue);"></span>Needs Input</span>
-                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-orange);"></span>Low Budget</span>
-                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 16px; height: 2px; background: var(--border-primary);"></span>Parent → Child</span>
-                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 16px; height: 2px; border-top: 2px dashed var(--accent-purple);"></span>Redundancy Link</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-orange);"></span>Prune Candidate</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 16px; height: 2px; background: var(--border-primary);"></span>Depends On</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 16px; height: 2px; border-top: 2px dashed var(--accent-orange);"></span>Collision Link</span>
             </div>
-            <div class="cluster-view-container" style="flex: 1; min-height: 0;">
-                <div class="cluster-map-canvas" id="cluster-svg-parent"></div>
-                <div class="cluster-sidebar" id="cluster-sidebar-content"></div>
+            <div class="cluster-view-container" style="flex: 1; min-height: 0; display: flex; position: relative;">
+                <div class="cluster-map-canvas" id="cluster-svg-parent" style="flex: 1; cursor: grab;"></div>
             </div>
         </div>
     `;
 
+    const nodes = SwarmState.graph.nodes;
     const nodeMap = {};
-    for (const agent of SwarmState.agents) {
-        nodeMap[agent.id] = {
-            id: agent.id,
-            agent: agent,
+    for (const [nid, n] of Object.entries(nodes)) {
+        nodeMap[nid] = {
+            id: nid,
+            node: n,
             children: [],
             parent: null,
+            depends_on: n.depends_on || [],
             x: 0,
             y: 0,
-            radius: 70
+            radius: 40
         };
     }
 
     const roots = [];
     for (const node of Object.values(nodeMap)) {
-        const parentId = node.agent.parent_id;
-        if (parentId && nodeMap[parentId]) {
-            nodeMap[parentId].children.push(node);
-            node.parent = nodeMap[parentId];
-        } else {
+        if (node.depends_on.length > 0) {
+            for (const dep of node.depends_on) {
+                if (nodeMap[dep]) {
+                    nodeMap[dep].children.push(node);
+                    if (!node.parent) node.parent = nodeMap[dep];
+                }
+            }
+        }
+        if (node.depends_on.length === 0 || !node.parent) {
             roots.push(node);
         }
     }
 
-    function layoutNode(node, level, parentAngle) {
+    function layoutTree(node, level, parentAngle) {
         const k = node.children.length;
         if (k === 0) {
-            node.radius = 70;
+            node.radius = 40;
             return;
         }
-
-        const orbitRadius = Math.max(160 - level * 35, 90);
+        const orbitRadius = Math.max(120 - level * 20, 80);
         for (let i = 0; i < k; i++) {
             const child = node.children[i];
             let angle;
             if (k === 1) {
-                angle = (parentAngle !== undefined) ? parentAngle : (i * 2 * Math.PI / k);
+                angle = (parentAngle !== undefined) ? parentAngle : (Math.PI / 2);
             } else {
-                const startAngle = (parentAngle !== undefined) ? parentAngle - Math.PI / 3 : 0;
-                const endAngle = (parentAngle !== undefined) ? parentAngle + Math.PI / 3 : 2 * Math.PI;
-                const arc = endAngle - startAngle;
+                const arc = Math.PI / 2;
+                const startAngle = (parentAngle !== undefined) ? parentAngle - arc/2 : 0;
                 angle = startAngle + (i / (k - 1)) * arc;
             }
             child.x = node.x + Math.cos(angle) * orbitRadius;
             child.y = node.y + Math.sin(angle) * orbitRadius;
-            layoutNode(child, level + 1, angle);
+            layoutTree(child, level + 1, angle);
         }
-
-        let maxDist = 0;
-        for (const child of node.children) {
-            const dist = Math.sqrt((child.x - node.x) ** 2 + (child.y - node.y) ** 2) + child.radius;
-            if (dist > maxDist) maxDist = dist;
-        }
-        node.radius = Math.max(maxDist + 15, 80);
     }
 
     for (const root of roots) {
         root.x = 0;
         root.y = 0;
-        layoutNode(root, 1);
+        layoutTree(root, 1);
     }
 
     const cx = 500;
-    const cy = 300;
+    const cy = 100;
     
     function shiftPositions(node, dx, dy) {
         node.x += dx;
@@ -988,168 +993,85 @@ function renderSwarmMap(container) {
         const r = roots[0];
         shiftPositions(r, cx - r.x, cy - r.y);
     } else if (roots.length > 1) {
-        let maxRootRadius = 0;
+        const spacingX = 200;
+        let currentX = cx - ((roots.length - 1) * spacingX) / 2;
         for (const r of roots) {
-            if (r.radius > maxRootRadius) maxRootRadius = r.radius;
-        }
-        const spacingRad = Math.max(maxRootRadius + 70, 270);
-        
-        for (let i = 0; i < roots.length; i++) {
-            const r = roots[i];
-            const angle = (i / roots.length) * 2 * Math.PI - Math.PI / 2;
-            const targetX = cx + Math.cos(angle) * spacingRad;
-            const targetY = cy + Math.sin(angle) * spacingRad;
-            shiftPositions(r, targetX - r.x, targetY - r.y);
-        }
-    }
-
-    const listAgents = SwarmState.agents;
-    const links = [];
-    for (let i = 0; i < listAgents.length; i++) {
-        for (let j = i + 1; j < listAgents.length; j++) {
-            const a1 = listAgents[i];
-            const a2 = listAgents[j];
-            const prox = calculateAgentDistance(a1, a2);
-            
-            const isCollision = SwarmState.collisions.some(col => 
-                (col.agent_a === a1.id && col.agent_b === a2.id) ||
-                (col.agent_a === a2.id && col.agent_b === a1.id)
-            );
-
-            if (prox.distance < 0.85 || isCollision) {
-                links.push({
-                    source: a1.id,
-                    target: a2.id,
-                    distance: prox.distance,
-                    isCollision: isCollision
-                });
-            }
+            shiftPositions(r, currentX - r.x, cy - r.y);
+            currentX += spacingX;
         }
     }
 
     const svgParent = document.getElementById('cluster-svg-parent');
     let svgHtml = `<svg class="cluster-svg" viewBox="0 0 1000 600" width="100%" height="100%">
         <defs>
-            <marker id="arrow" markerWidth="7" markerHeight="7" refX="29" refY="3" orient="auto">
+            <marker id="arrow" markerWidth="6" markerHeight="6" refX="22" refY="3" orient="auto">
                 <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-primary)"/>
             </marker>
         </defs>`;
 
-    // Boundaries
-    function drawBoundaries(node) {
-        if (node.children.length > 0) {
-            svgHtml += `<circle class="cluster-boundary" cx="${node.x}" cy="${node.y}" r="${node.radius}" />`;
-            svgHtml += `<text x="${node.x}" y="${node.y - node.radius + 12}" 
-                             style="font-family: var(--font-mono); font-size: 8px; fill: var(--text-muted); text-anchor: middle; font-weight: 600; opacity: 0.7;">
-                             CLUSTER: AGENT ${node.id}
-                        </text>`;
-        }
+    // Draw solid edges for dependencies
+    for (const node of Object.values(nodeMap)) {
         for (const child of node.children) {
-            drawBoundaries(child);
+            svgHtml += `<line class="cluster-link" x1="${node.x}" y1="${node.y}" x2="${child.x}" y2="${child.y}" stroke="var(--border-primary)" stroke-width="2" marker-end="url(#arrow)" />`;
         }
     }
-    for (const root of roots) {
-        drawBoundaries(root);
+
+    // Draw dashed amber edges for collisions
+    for (const col of SwarmState.collisions || []) {
+        if (nodeMap[col.agent_a] && nodeMap[col.agent_b]) {
+            const nA = nodeMap[col.agent_a];
+            const nB = nodeMap[col.agent_b];
+            svgHtml += `<line class="cluster-link" x1="${nA.x}" y1="${nA.y}" x2="${nB.x}" y2="${nB.y}" stroke="var(--accent-orange)" stroke-width="2" stroke-dasharray="5,5" />`;
+        }
     }
 
-    // Parent -> child directional edges
+    // Draw Nodes
     for (const node of Object.values(nodeMap)) {
-        if (node.parent) {
-            svgHtml += `<line class="cluster-edge" x1="${node.parent.x}" y1="${node.parent.y}" x2="${node.x}" y2="${node.y}" marker-end="url(#arrow)" style="stroke: var(--border-primary); stroke-width: 1.4; opacity: 0.6;"/>`;
+        let fill = 'var(--text-muted)';
+        let icon = '';
+        const nData = node.node;
+        
+        if (nData.status === 'valid') {
+            fill = 'var(--accent-green)';
+            icon = '✓';
+        } else if (nData.status === 'refuted' || nData.status === 'invalid') {
+            fill = 'var(--accent-red)';
+            icon = '💀';
+        } else if (nData.status === 'exploring' || nData.status === 'proposed') {
+            fill = 'var(--bg-tertiary)';
         }
-    }
 
-    // Links (Proximity)
-    for (const link of links) {
-        const n1 = nodeMap[link.source];
-        const n2 = nodeMap[link.target];
-        if (n1 && n2) {
-            const opacity = (1.0 - link.distance) * 0.8;
-            const strokeWidth = (1.0 - link.distance) * 5;
-            let linkClass = 'cluster-link ';
-            
-            if (link.isCollision) {
-                linkClass += 'cluster-link--collision';
-            } else if (link.distance < 0.5) {
-                linkClass += 'cluster-link--proximity-high';
-            } else {
-                linkClass += 'cluster-link--proximity-mod';
+        const agent = SwarmState.agents.find(a => a.id === node.id || a.active_node_id === node.id);
+        if (agent) {
+            if (agent.status === 'syncing') {
+                fill = 'var(--accent-orange)';
+            } else if (agent.status === 'validating') {
+                fill = 'var(--accent-green)';
             }
-
-            svgHtml += `<line class="${linkClass}" x1="${n1.x}" y1="${n1.y}" x2="${n2.x}" y2="${n2.y}" 
-                             stroke-width="${link.isCollision ? 4 : strokeWidth}" 
-                             stroke-opacity="${opacity}" />`;
-            
-            const midX = (n1.x + n2.x) / 2;
-            const midY = (n1.y + n2.y) / 2;
-            svgHtml += `
-                <g class="cluster-link-label-group">
-                    <rect class="cluster-link-bg" x="${midX - 20}" y="${midY - 7}" width="40" height="14" />
-                    <text class="cluster-link-label" x="${midX}" y="${midY}">d:${link.distance.toFixed(2)}</text>
-                </g>
-            `;
-        }
-    }
-
-    // Nodes
-    for (const node of Object.values(nodeMap)) {
-        const agent = node.agent;
-        const status = agent.status || 'unknown';
-        const isSelected = agent.id === UIState.selectedAgentId;
-        
-        let statusClass = `node--${status}`;
-        if (isSelected) {
-            statusClass += ' node--selected';
         }
 
-        // Budget color-coding
-        const agentBudget = agent.token_budget || (SwarmState.session_budget || 20000);
-        const agentTokens = agent.output_tokens || 0;
-        const budgetPctCluster = Math.min(Math.round((agentTokens / Math.max(agentBudget, 1)) * 100), 100);
-        const budgetColorClass = budgetPctCluster > 90 ? 'budget--red' : budgetPctCluster > 60 ? 'budget--amber' : 'budget--green';
+        const isSelected = (UIState.selectedAgentId === node.id);
+        const strokeColor = isSelected ? 'var(--text-primary)' : 'var(--border-primary)';
+        const strokeWidth = isSelected ? 3 : 1;
 
-        const role = escapeHtml(truncate(agent.personality || agent.role || 'Generalist', 20));
-        const goalSnippet = escapeHtml(truncate(agent.goal || '', 24));
-        const budgetLabel = `${agentTokens.toLocaleString()}/${agentBudget.toLocaleString()} (${budgetPctCluster}%)`;
-
-        const needsInput = SwarmState.pending_spawns.some(s => s.agent_id === agent.id) ||
-                           SwarmState.pending_blockers.some(b => b.agent_id === agent.id) ||
-                           agent.status === 'pending_termination' ||
-                           agent.status === 'syncing' ||
-                           agent.status === 'awaiting_child';
-        const lowBudget = budgetPctCluster > 90;
-
-        svgHtml += `
-            <g class="cluster-node" data-agent-id="${agent.id}">
-                <g class="cluster-node-g">`;
-        
-        if (needsInput) {
-            svgHtml += `<circle cx="${node.x}" cy="${node.y}" r="29" fill="none" stroke="var(--accent-blue)" stroke-width="2"/>`;
-        } else if (lowBudget) {
-            svgHtml += `<circle cx="${node.x}" cy="${node.y}" r="29" fill="none" stroke="var(--accent-orange)" stroke-width="2"/>`;
+        let outerRing = '';
+        if (agent && agent.needs_input) {
+            outerRing = `<circle cx="${node.x}" cy="${node.y}" r="26" fill="none" stroke="var(--accent-blue)" stroke-width="2" class="pulse-ring" />`;
+        }
+        if (nData.prune_candidate) {
+            outerRing = `<circle cx="${node.x}" cy="${node.y}" r="26" fill="none" stroke="var(--accent-orange)" stroke-width="2" stroke-dasharray="4,4" />`;
         }
 
         svgHtml += `
-                    <circle class="cluster-node-circle ${statusClass} ${budgetColorClass}" cx="${node.x}" cy="${node.y}" r="22" />
-                    <text class="cluster-node-text" x="${node.x}" y="${node.y}">${agent.id}</text>
-                    
-                    <text x="${node.x}" y="${node.y + 36}" 
-                          style="font-family: var(--font-sans); font-size: 10px; font-weight: 600; fill: var(--text-bright); text-anchor: middle;">
-                          Agent ${agent.id}
-                    </text>
-                    <text x="${node.x}" y="${node.y + 48}" 
-                          style="font-family: var(--font-sans); font-size: 8px; font-weight: 500; fill: var(--text-muted); text-anchor: middle;">
-                          ${role}
-                    </text>
-                    <text x="${node.x}" y="${node.y + 58}" 
-                          style="font-family: var(--font-sans); font-size: 8px; fill: var(--text-muted); opacity: 0.7; text-anchor: middle; font-style: italic;">
-                          "${goalSnippet}"
-                    </text>
-                    <text x="${node.x}" y="${node.y + 68}" 
-                          style="font-family: var(--font-mono); font-size: 7px; fill: ${budgetPctCluster > 90 ? 'var(--accent-red)' : budgetPctCluster > 60 ? 'var(--accent-amber)' : 'var(--accent-green)'}; text-anchor: middle; opacity: 0.8;">
-                          🔋 ${budgetLabel}
-                    </text>
-                </g>
+            <g class="cluster-node" data-agent-id="${node.id}" style="cursor: pointer;">
+                ${outerRing}
+                <circle cx="${node.x}" cy="${node.y}" r="20" fill="${fill}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
+                <text x="${node.x}" y="${node.y + 4}" style="font-family: var(--font-sans); font-size: 11px; fill: #fff; text-anchor: middle; font-weight: 600;">
+                    ${icon ? icon : node.id}
+                </text>
+                <text x="${node.x}" y="${node.y + 32}" style="font-family: var(--font-mono); font-size: 9px; fill: var(--text-secondary); text-anchor: middle;">
+                    ${truncate(nData.claim || 'Node ' + node.id, 15)}
+                </text>
             </g>
         `;
     }
@@ -1163,31 +1085,12 @@ function renderSwarmMap(container) {
             const agentId = nodeG.dataset.agentId;
             UIState.selectedAgentId = agentId;
             UIState.selectedWorkspaceAgent = agentId;
-            UIState.workspaceData = null;
-            svgParent.querySelectorAll('.cluster-node-circle').forEach(circle => {
-                circle.classList.remove('node--selected');
-            });
-            nodeG.querySelector('.cluster-node-circle').classList.add('node--selected');
-            renderClusterSidebar(agentId, document.getElementById('cluster-sidebar-content'));
             render();
         } else {
             UIState.selectedAgentId = null;
             render();
         }
     });
-
-    svgParent.querySelector('svg').addEventListener('dblclick', (e) => {
-        const nodeG = e.target.closest('.cluster-node');
-        if (nodeG) {
-            const agentId = nodeG.dataset.agentId;
-            UIState.selectedAgentId = agentId;
-            UIState.inspectorOpen = true;
-            render();
-        }
-    });
-
-    const selectedId = UIState.selectedAgentId || (SwarmState.agents.length > 0 ? SwarmState.agents[0].id : null);
-    renderClusterSidebar(selectedId, document.getElementById('cluster-sidebar-content'));
 }
 
 function renderStage(container) {

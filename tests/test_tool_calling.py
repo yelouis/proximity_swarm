@@ -244,6 +244,7 @@ class TestOllamaToolCalling(unittest.TestCase):
 
         # Initialize and run runner
         runner = AgentRunner(
+            graph_mode="linear",
             agent_id=agent_id,
             task_id="task_007",
             llm_provider="ollama",

@@ -58,8 +58,11 @@ def save_json(filepath, data):
         import time
         data["last_updated"] = time.time()
     try:
-        with open(filepath, 'w') as f:
+        import os
+        tmp_path = filepath + ".tmp"
+        with open(tmp_path, 'w') as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, filepath)
         return True
     except Exception:
         return False
@@ -217,6 +220,65 @@ SPAWN_AGENT_TOOL = {
     }
 }
 
+# New Research Tools
+RUN_PYTHON_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_python",
+        "description": "Executes python code in a sandboxed environment and returns the output. Use this for math and simulations.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The python code to execute."
+                }
+            },
+            "required": ["code"]
+        }
+    }
+}
+
+READ_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Reads a file from the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to the file."
+                }
+            },
+            "required": ["path"]
+        }
+    }
+}
+
+WRITE_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": "Writes content to a file in the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to the file."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write."
+                }
+            },
+            "required": ["path", "content"]
+        }
+    }
+}
+
 # Simple registry mapping tool names to actual execution functions
 TOOL_REGISTRY = {}
 if web_search:
@@ -226,6 +288,15 @@ else:
     TOOL_REGISTRY["search_web"] = lambda query: json.dumps([
         {"title": f"Fallback Mock for query: {query}", "url": "", "snippet": "Search module unavailable."}
     ])
+
+try:
+    import research_tools
+    TOOL_REGISTRY["run_python"] = lambda code: research_tools.run_python(code)
+    TOOL_REGISTRY["read_file"] = lambda path: research_tools.read_file(path)
+    TOOL_REGISTRY["write_file"] = lambda path, content: research_tools.write_file(path, content)
+except ImportError:
+    pass
+
 
 
 def call_ollama_chat_with_tools(messages, tools=None, model="gemma4:latest", registry=None):
@@ -347,7 +418,7 @@ def is_ollama_running():
 
 
 class AgentRunner:
-    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None, sub_swarm_id=None):
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None, sub_swarm_id=None, graph_mode="graph"):
         self.agent_id = agent_id
         self.interactive = interactive
         self.step_delay = step_delay
@@ -358,6 +429,7 @@ class AgentRunner:
         self.personality = personality or "Generalist"
         self.custom_goal = goal
         self.sub_swarm_id = sub_swarm_id
+        self.graph_mode = graph_mode
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
         global CURRENT_AGENT_STATE_FILE
@@ -747,7 +819,8 @@ class AgentRunner:
 
     def check_tombstones(self, files, tools):
         """Query tombstones.json to check if any upcoming command/file matches a known dead-end."""
-        tombstones = load_json(TOMBSTONES_FILE) or []
+        tombstones_data = load_json(TOMBSTONES_FILE) or []
+        tombstones = tombstones_data if isinstance(tombstones_data, list) else tombstones_data.get("dead_ends", [])
         for t in tombstones:
             if t.get("is_pruned"):
                 continue
@@ -759,10 +832,11 @@ class AgentRunner:
 
     def check_pruned_tombstones(self, files, tools):
         """Query tombstones.json to retrieve warning context for pruned paths."""
-        tombstones = load_json(TOMBSTONES_FILE) or []
+        tombstones_data = load_json(TOMBSTONES_FILE) or []
+        tombstones = tombstones_data if isinstance(tombstones_data, list) else tombstones_data.get("pruned_agents", [])
         pruned_matches = []
         for t in tombstones:
-            if not t.get("is_pruned"):
+            if not t.get("is_pruned") and isinstance(tombstones_data, list):
                 continue
             file_match = any(f in t.get("file_path", "") for f in files)
             tool_match = any(tool == t.get("tool_used", "") for tool in tools)
@@ -1138,7 +1212,169 @@ class AgentRunner:
         # Evaluate isolated spawn every 5 steps
         self.evaluate_isolation_spawn()
 
-        # 2. Progress task step
+        if getattr(self, "graph_mode", "graph") == "graph":
+            self.execute_step_graph()
+        else:
+            self.execute_step_linear()
+
+    def execute_step_graph(self):
+        import logic_graph
+        role_mode = self.state.get("role_mode", "proposer")
+        active_node_id = self.state.get("active_node_id")
+        
+        # Proposer picks from frontier
+        if role_mode == "proposer" and not active_node_id:
+            frontier = logic_graph.frontier()
+            print(f"DEBUG: frontier() = {frontier}, all nodes = {logic_graph._get_all_nodes().keys()}")
+            if not frontier:
+                print(f"Agent {self.agent_id} found no frontier nodes. Waiting.")
+                return
+            target = frontier[0]
+            approach = self.state.get("approach")
+            if approach:
+                approach_nodes = [n for n in frontier if n.get("approach") == approach]
+                if approach_nodes:
+                    target = approach_nodes[0]
+            
+            active_node_id = target["node_id"]
+            self.state["active_node_id"] = active_node_id
+            save_json(self.state_file, self.state)
+            
+        # Validator polls for proposed nodes
+        if role_mode == "validator" and not active_node_id:
+            proposed = logic_graph.nodes_by_status("proposed")
+            approach = self.state.get("approach")
+            if approach:
+                proposed = [n for n in proposed if n.get("approach") == approach]
+            if proposed:
+                active_node_id = proposed[0]["node_id"]
+                self.state["active_node_id"] = active_node_id
+                save_json(self.state_file, self.state)
+            else:
+                return
+
+        if not active_node_id:
+            return
+            
+        node = logic_graph.get_node(active_node_id)
+        if not node:
+            self.state["active_node_id"] = None
+            save_json(self.state_file, self.state)
+            return
+            
+        if role_mode == "proposer":
+            if self.llm_provider == "rules":
+                new_claim = f"Proposed step from {active_node_id}"
+                oracle = {"type": "shell", "spec": "echo ok"}
+            else:
+                # LLM call
+                new_claim = "LLM Proposed claim"
+                oracle = {"type": "shell", "spec": "echo ok"}
+                
+            similar = logic_graph.similar_open_nodes(new_claim)
+            if similar:
+                existing_node_id = similar[0]
+                print(f"Agent {self.agent_id} found similar open node {existing_node_id}. Joining.")
+                self.state["active_node_id"] = existing_node_id
+                self.state["role_mode"] = "validator"
+                save_json(self.state_file, self.state)
+                return
+                
+            new_node_id = f"n_{self.agent_id}_{int(time.time())}"
+            logic_graph.add_node({
+                "node_id": new_node_id,
+                "claim": new_claim,
+                "justification": "Proposed justification",
+                "depends_on": [active_node_id],
+                "approach": self.state.get("approach", "A"),
+                "status": "proposed",
+                "kind": "lemma",
+                "oracle": oracle,
+                "provenance": {"proposed_by": self.agent_id}
+            })
+            self.state["active_node_id"] = None
+            save_json(self.state_file, self.state)
+            print(f"Agent {self.agent_id} PROPOSED node {new_node_id}")
+            try:
+                import causal_tracer
+                causal_tracer.log_propose(self.agent_id, new_node_id, new_claim)
+            except Exception:
+                pass
+            
+        elif role_mode == "validator":
+            if node.get("status") != "proposed":
+                self.state["active_node_id"] = None
+                save_json(self.state_file, self.state)
+                return
+                
+            import judge
+            import oracle
+            
+            judge_provider, judge_model = judge.select_judge_model(
+                getattr(self, "judge_provider", None),
+                getattr(self, "judge_model", None),
+                self.llm_provider,
+                getattr(self, "ollama_model", None) or getattr(self, "gemini_model", None)
+            )
+            
+            node_oracle_type = node.get("oracle", {}).get("type", "none")
+            passed = False
+            
+            if node_oracle_type == "none":
+                # Unverifiable
+                passed = False
+            elif node_oracle_type == "checker_model":
+                result = judge.validate_step(node, judge_provider, judge_model, self.agent_id)
+                passed = result["valid"]
+            else:
+                passed, msg = oracle.evaluate_oracle(node, self.workspace_dir)
+                if passed is None:
+                    # Defer to judge
+                    result = judge.validate_step(node, judge_provider, judge_model, self.agent_id)
+                    passed = result["valid"]
+            
+            if self.llm_provider == "rules":
+                passed = not self.state.get("force_fail", False)
+                if node_oracle_type == "none":
+                    passed = False
+            
+            if passed:
+                logic_graph.update_node(active_node_id, status="validated")
+                self.state["steps_completed"] = self.state.get("steps_completed", 0) + 1
+                self.state["progress"] = min(100, self.state["steps_completed"] * 20)
+                print(f"Agent {self.agent_id} VALIDATED node {active_node_id}")
+                try:
+                    import causal_tracer
+                    causal_tracer.log_validate(self.agent_id, active_node_id)
+                except Exception:
+                    pass
+            else:
+                # To do: self healing loop for shell/numeric
+                logic_graph.update_node(active_node_id, status="refuted")
+                print(f"Agent {self.agent_id} REFUTED node {active_node_id}")
+                try:
+                    import causal_tracer
+                    causal_tracer.log_refute(self.agent_id, active_node_id)
+                except Exception:
+                    pass
+                
+                tombstones = load_json(TOMBSTONES_FILE) or {"pruned_agents": [], "dead_ends": [], "refuted_nodes": []}
+                if "refuted_nodes" not in tombstones:
+                    tombstones["refuted_nodes"] = []
+                tombstones["refuted_nodes"].append({
+                    "node_id": active_node_id,
+                    "claim": node.get("claim"),
+                    "approach": node.get("approach"),
+                    "reason": "Validation failed"
+                })
+                save_json(TOMBSTONES_FILE, tombstones)
+                
+            self.state["active_node_id"] = None
+            save_json(self.state_file, self.state)
+
+    def execute_step_linear(self):
+
+        # 2. Progress task step (Linear)
         task_id = self.state.get("task_id")
         tasks_data = load_json(MOCK_TASKS_FILE)
         if not tasks_data or task_id not in tasks_data["tasks"]:
@@ -1277,7 +1513,9 @@ class AgentRunner:
                         f"SPAWNING ABILITY: If you are working on a complex, multi-stage goal and realize that a sub-task "
                         f"can be executed independently in parallel (e.g. building a helper script, testing a sub-module, or parsing config), "
                         f"you can call the `spawn_agent` tool to request the supervisor to spawn a specialized sub-agent. "
-                        f"Do not block on the sub-agent; spawn it and continue with your main tasks."
+                        f"Do not block on the sub-agent; spawn it and continue with your main tasks.\n\n"
+                        f"RESEARCH TOOLS: You have access to a Python sandbox (`run_python`) and file system access (`read_file`, `write_file`). "
+                        f"Use them to test math properties, run simulations, or persist intermediate data when exploring complex logic."
                     )
                     user_prompt = ""
                     if pruned_context_str:
@@ -1319,11 +1557,18 @@ class AgentRunner:
                         "search_web": lambda query: json.dumps(web_search.search_web(query) if web_search else []),
                         "spawn_agent": lambda goal, initial_files: self.request_spawn_agent(goal, initial_files)
                     }
+                    try:
+                        import research_tools
+                        local_registry["run_python"] = lambda code: research_tools.run_python(code)
+                        local_registry["read_file"] = lambda path: research_tools.read_file(path)
+                        local_registry["write_file"] = lambda path, content: research_tools.write_file(path, content)
+                    except ImportError:
+                        pass
                     
                     print(f"  [Tool Use Check] Querying Ollama with search and spawn tool capabilities...")
                     res_content = call_ollama_chat_with_tools(
                         messages=messages,
-                        tools=[SEARCH_WEB_TOOL, SPAWN_AGENT_TOOL],
+                        tools=[SEARCH_WEB_TOOL, SPAWN_AGENT_TOOL, RUN_PYTHON_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL],
                         model=self.ollama_model,
                         registry=local_registry
                     )
@@ -1357,7 +1602,8 @@ class AgentRunner:
             print(f"  [CRASH] Step execution failed: {error_msg}")
             
             # Write a tombstone
-            tombstones = load_json(TOMBSTONES_FILE) or []
+            tombstones_data = load_json(TOMBSTONES_FILE) or []
+            tombstones = tombstones_data if isinstance(tombstones_data, list) else tombstones_data.get("dead_ends", [])
             new_tombstone = {
                 "file_path": step_files[0] if step_files else "unknown",
                 "tool_used": step_tools[0] if step_tools else "unknown",
@@ -1366,7 +1612,11 @@ class AgentRunner:
                 "timestamp": get_iso_timestamp()
             }
             tombstones.append(new_tombstone)
-            save_json(TOMBSTONES_FILE, tombstones)
+            if isinstance(tombstones_data, dict):
+                tombstones_data["dead_ends"] = tombstones
+                save_json(TOMBSTONES_FILE, tombstones_data)
+            else:
+                save_json(TOMBSTONES_FILE, tombstones)
             self.add_thought_trace(
                 f"Step execution CRASHED: {error_msg}. Tombstone registered.",
                 "failed",
@@ -1412,7 +1662,8 @@ class AgentRunner:
             if not passed:
                 error_msg = f"Step '{current_step['name']}' verification failed after {attempts} self-heal attempt(s)."
                 print(f"  [VERIFICATION BLOCKER] {error_msg}\n  Output: {vout[:300]}")
-                tombstones = load_json(TOMBSTONES_FILE) or []
+                tombstones_data = load_json(TOMBSTONES_FILE) or []
+                tombstones = tombstones_data if isinstance(tombstones_data, list) else tombstones_data.get("dead_ends", [])
                 tombstones.append({
                     "file_path": primary_file,
                     "tool_used": step_tools[0] if step_tools else "verification",
@@ -1420,7 +1671,11 @@ class AgentRunner:
                     "fix_action": "Manual review required; verification command did not pass.",
                     "timestamp": get_iso_timestamp()
                 })
-                save_json(TOMBSTONES_FILE, tombstones)
+                if isinstance(tombstones_data, dict):
+                    tombstones_data["dead_ends"] = tombstones
+                    save_json(TOMBSTONES_FILE, tombstones_data)
+                else:
+                    save_json(TOMBSTONES_FILE, tombstones)
                 self.add_thought_trace(
                     error_msg + " Registering tombstone and proposing termination.",
                     "failed", {"error": vout[:500], "attempts": attempts}
@@ -1554,82 +1809,20 @@ class AgentRunner:
         print(f"  Progress: {agent_b['progress']}% | Current: {agent_b['current_step']['name']}")
         print("-"*50)
         
-        action = None
-        reason = ""
+        import judge
+        judge_provider, judge_model = judge.select_judge_model(
+            getattr(self, "judge_provider", None),
+            getattr(self, "judge_model", None),
+            self.llm_provider,
+            getattr(self, "ollama_model", None) or getattr(self, "gemini_model", None)
+        )
         
-        if self.interactive:
-            print("[INTERACTIVE MODE] Select resolution outcome:")
-            print(f"  1. Redundant: Propose terminating Agent A ({agent_a['id']}) - Agent B is ahead.")
-            print(f"  2. Redundant: Propose terminating Agent B ({agent_b['id']}) - Agent A is ahead.")
-            print("  3. Complementary: Keep both alive, share state information and resume.")
-            
-            while True:
-                choice = input("Enter choice (1, 2, or 3): ").strip()
-                if choice == "1":
-                    action = "kill_a"
-                    reason = "User manually proposed Agent A termination."
-                    break
-                elif choice == "2":
-                    action = "kill_b"
-                    reason = "User manually proposed Agent B termination."
-                    break
-                elif choice == "3":
-                    action = "keep_both"
-                    reason = "User manually marked goals as complementary. Resuming both."
-                    break
-                else:
-                    print("Invalid input. Select 1, 2, or 3.")
-        else:
-            # Determine LLM provider (Ollama or Gemini or rules)
-            provider = self.llm_provider
-            
-            # Auto-detect defaults if not explicitly set
-            if not provider:
-                if os.environ.get("GEMINI_API_KEY"):
-                    provider = "gemini"
-                elif is_ollama_running():
-                    provider = "ollama"
-                else:
-                    provider = "rules"
-            
-            prompt = (
-                f"You are the Swarm Supervisor coordinating two autonomous coding agents:\n"
-                f"Agent A: ID={agent_a['id']}, Role={agent_a.get('personality', 'Generalist')}, Goal={agent_a['goal']}, Progress={agent_a['progress']}%, CurrentStep={agent_a['current_step']['description']}\n"
-                f"Agent B: ID={agent_b['id']}, Role={agent_b.get('personality', 'Generalist')}, Goal={agent_b['goal']}, Progress={agent_b['progress']}%, CurrentStep={agent_b['current_step']['description']}\n\n"
-                f"Evaluate if their goals are redundant (overlapping work on same file/subtask) or complementary.\n"
-                f"If redundant, propose terminating the one with less progress. If complementary, keep both.\n"
-                f"Respond strictly in JSON with keys 'action' (must be one of 'kill_a', 'kill_b', 'keep_both') and 'reason' (text explanation)."
-            )
-            
-            res = None
-            if provider == "gemini":
-                print("Invoking Gemini LLM Negotiation engine...")
-                res = call_gemini_api(prompt)
-            elif provider == "ollama":
-                print(f"Invoking Ollama LLM Negotiation engine (Model: {self.ollama_model})...")
-                res = call_ollama_api(prompt, model=self.ollama_model)
-                
-            if res and "action" in res:
-                action = res["action"]
-                reason = res.get("reason", "LLM determined resolution.")
-                print(f"LLM ({provider.upper()}) Decision: {action.upper()}")
-                print(f"Reason: {reason}")
-            
-            # Rule-based fallback if rules were selected or API calls failed
-            if not action:
-                print("Running local deterministic deconfliction rules...")
-                is_redundant = collision["similarity_metrics"]["goal_cosine"] > 0.6
-                if is_redundant:
-                    if agent_a["progress"] >= agent_b["progress"]:
-                        action = "kill_b"
-                        reason = f"Redundancy detected. Propose Agent B ({agent_b['id']}) termination."
-                    else:
-                        action = "kill_a"
-                        reason = f"Redundancy detected. Propose Agent A ({agent_a['id']}) termination."
-                else:
-                    action = "keep_both"
-                    reason = "Goals deemed complementary. Resuming both."
-                    
+        result = judge.resolve_collision(collision, judge_provider, judge_model, self.agent_id)
+        action = result["action"]
+        reason = result["reason"]
+        
+        self.add_thought_trace(f"Collision resolved by Judge. Action: {action}. Reason: {reason}", "decision")
+        
         # Apply resolution
         if action == "kill_a":
             agent_a["status"] = "pending_termination"
@@ -1929,6 +2122,7 @@ def main():
     parser.add_argument("--personality", help="The personality/role assigned to this agent")
     parser.add_argument("--goal", help="The dedicated goal/subtask assigned to this agent")
     parser.add_argument("--sub-swarm-id", help="The sub-swarm functional group ID this agent belongs to")
+    parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode")
     args = parser.parse_args()
     
     runner = AgentRunner(
@@ -1941,7 +2135,8 @@ def main():
         ollama_model=args.ollama_model,
         personality=args.personality,
         goal=args.goal,
-        sub_swarm_id=args.sub_swarm_id
+        sub_swarm_id=args.sub_swarm_id,
+        graph_mode=args.graph_mode
     )
     
     print(f"Starting Agent {args.agent_id} runner...")

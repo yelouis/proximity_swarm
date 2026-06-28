@@ -1,0 +1,13 @@
+{
+    "goal": "Prove the Collatz Conjecture for n <= 10",
+    "swarm_provider": "ollama",
+    "judge_provider": "ollama",
+    "model": "gemma4:latest",
+    "budget": 20000,
+    "graph_mode": "graph",
+    "seed_roles": [
+        {
+            "role": "Generalist"
+        }
+    ]
+}

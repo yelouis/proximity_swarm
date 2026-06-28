@@ -38,7 +38,7 @@ class TestSelfHealing(unittest.TestCase):
         agent_runner.MOCK_TASKS_FILE = os.path.abspath(REAL_TASKS)
         agent_runner.MAX_HEAL_ATTEMPTS = 3
 
-        self.runner = AgentRunner(agent_id="901", task_id="task_jwt_auth", step_delay=0.0)
+        self.runner = AgentRunner(graph_mode="linear", agent_id="901", task_id="task_jwt_auth", step_delay=0.0)
         # Offline by default so heal_file returns None unless a test overrides it.
         self.runner.llm_provider = None
 

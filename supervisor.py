@@ -54,10 +54,26 @@ def evaluate_sub_swarm_completion():
                             all_agents[aid] = json.load(f_ag)
                     except Exception:
                         pass
+        is_graph_complete = False
+        try:
+            import logic_graph
+            path = logic_graph.validated_path_to_goal()
+            if path is not None:
+                is_graph_complete = True
+        except Exception:
+            pass
+            
         updated = False
         for sid, s in state.get("sub_swarms", {}).items():
             if s.get("status") == "active":
                 agent_ids = s.get("agent_ids", [])
+                
+                if is_graph_complete:
+                    s["status"] = "completed"
+                    updated = True
+                    print(f"[Supervisor] Sub-Swarm {sid} completed via graph validation.")
+                    continue
+                    
                 if not agent_ids:
                     s["status"] = "completed"
                     updated = True
@@ -96,7 +112,7 @@ def evaluate_sub_swarm_completion():
         print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
-def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False):
+def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False, graph_mode="graph"):
     """
     Launches a swarm dynamically, starting with initial_agents (list of dicts containing agent_id and task_id).
     Dynamically spawns runners for any children created during execution.
@@ -142,6 +158,30 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         except Exception:
             pass
     
+    if graph_mode == "graph":
+        try:
+            import logic_graph
+            logic_graph.init_graph()
+            nodes = logic_graph._get_all_nodes()
+            if not nodes:
+                macro_goal = state.get("macro_goal", "Run task")
+                logic_graph.add_node({
+                    "node_id": "goal_0",
+                    "kind": "goal",
+                    "claim": macro_goal,
+                    "status": "proposed",
+                    "depends_on": []
+                })
+                logic_graph.add_node({
+                    "node_id": "premise_0",
+                    "kind": "premise",
+                    "claim": "Initial state and context",
+                    "status": "validated",
+                    "depends_on": []
+                })
+        except Exception as e:
+            print(f"Error seeding logic graph: {e}")
+
     # 1. Start the background Supervisor Monitor process
     print("[Supervisor] Launching Supervisor Monitor daemon...")
     monitor_cmd = [sys.executable, "proximity_monitor.py", "--interval", "0.5"]
@@ -153,6 +193,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         monitor_cmd.extend(["--budget", str(budget)])
     if auto_approve_spawns:
         monitor_cmd.append("--auto-approve-spawns")
+    monitor_cmd.extend(["--graph-mode", graph_mode])
     monitor_proc = subprocess.Popen(
         monitor_cmd, 
         stdout=subprocess.DEVNULL, 
@@ -184,6 +225,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             cmd.extend(["--personality", personality])
         if goal:
             cmd.extend(["--goal", goal])
+        cmd.extend(["--graph-mode", graph_mode])
             
         print(f"[Supervisor] Launching Agent {agent_id} runner subprocess...")
         running_processes[agent_id] = subprocess.Popen(cmd)
@@ -281,6 +323,53 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             
         print("\n[Supervisor] Swarm execution completed successfully.")
         
+        # Phase 8: Emit observability artifacts
+        try:
+            import logic_graph
+            import causal_tracer
+            import memory_store
+            
+            ts = int(time.time())
+            
+            # 1. Graph JSON and Mermaid
+            graph_json = logic_graph.to_artifact_json()
+            mermaid_str = logic_graph.to_mermaid()
+            
+            graph_dir = os.path.join(WORKSPACE_DIR, ".proximity_swarm", "graph")
+            os.makedirs(graph_dir, exist_ok=True)
+            
+            json_path = os.path.join(graph_dir, f"run_{ts}.json")
+            with open(json_path, 'w') as f:
+                json.dump(graph_json, f, indent=2)
+                
+            md_path = os.path.join(graph_dir, f"run_{ts}.md")
+            with open(md_path, 'w') as f:
+                f.write(f"# Logic Graph Run {ts}\n\n```mermaid\n{mermaid_str}\n```\n")
+                
+            print(f"[Supervisor] Artifacts saved to {json_path} and {md_path}")
+            
+            # 2. Episodic memory
+            macro_goal = "Unknown Goal"
+            try:
+                if os.path.exists(orchestrator_file):
+                    with open(orchestrator_file, 'r') as f:
+                        macro_goal = json.load(f).get("macro_goal", "Unknown Goal")
+                elif initial_agents and initial_agents[0].get("goal"):
+                    macro_goal = initial_agents[0].get("goal")
+            except Exception:
+                pass
+                
+            memory_store.save_episode(
+                goal=macro_goal,
+                result={"graph": graph_json},
+                status="completed"
+            )
+            print("[Supervisor] Episodic memory saved.")
+            
+        except Exception as e:
+            print(f"[Supervisor] Failed to save observability artifacts: {e}")
+
+        
     except KeyboardInterrupt:
         print("\n[Supervisor] Swarm execution interrupted by user. Terminating processes...")
     finally:
@@ -299,7 +388,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         print("[Supervisor] Cleaned up child processes.")
 
 
-def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000):
+def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, graph_mode="graph"):
     """
     Launches two agents assigned to the same task (redundancy test).
     If deconflict is enabled, applies goal deconfliction offsets to their files.
@@ -315,12 +404,14 @@ def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, o
         llm_provider=llm_provider,
         ollama_model=ollama_model,
         step_delay=step_delay,
-        budget=budget
+        budget=budget,
+        graph_mode=graph_mode
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Proximity Swarm V2 - Orchestrator Entrypoint")
+    parser.add_argument("--run-spec", help="Path to declarative JSON/YAML run spec file")
     parser.add_argument("--run-redundant", action="store_true", help="Launch two identical auth agents (collision check)")
     parser.add_argument("--task-id", help="Launch a custom task from mock_tasks.json and manage the swarm dynamically")
     parser.add_argument("--deconflict", action="store_true", help="Enable goal deconfliction file parameter offsets")
@@ -332,11 +423,28 @@ def main():
     parser.add_argument("--agents-config", help="JSON string representing starting agent configurations")
     parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     parser.add_argument("--auto-approve-spawns", action="store_true", default=None, help="Bypass manual operator approval for spawn requests")
+    parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode (linear steps or graph)")
     args = parser.parse_args()
     
+    if args.run_spec:
+        with open(args.run_spec, 'r') as f:
+            if args.run_spec.endswith('.yaml') or args.run_spec.endswith('.yml'):
+                import yaml
+                spec = yaml.safe_load(f)
+            else:
+                spec = json.load(f)
+        
+        args.task_id = spec.get("goal") # Re-map for the mock logic
+        # For a full headless driver, we'd override other args
+        args.budget = spec.get("budget", args.budget)
+        args.llm_provider = spec.get("swarm_provider", args.llm_provider)
+        args.graph_mode = spec.get("graph_mode", args.graph_mode)
+        if "seed_roles" in spec:
+            args.agents_config = json.dumps([{"role": r["role"], "goal": spec.get("goal")} for r in spec["seed_roles"]])
+
     auto_approve_spawns = args.auto_approve_spawns
     if auto_approve_spawns is None:
-        if args.agents_config:
+        if args.agents_config and not args.run_spec:
             auto_approve_spawns = False
         else:
             auto_approve_spawns = True
@@ -348,7 +456,8 @@ def main():
             llm_provider=args.llm_provider,
             ollama_model=args.ollama_model,
             step_delay=args.step_delay,
-            budget=args.budget
+            budget=args.budget,
+            graph_mode=args.graph_mode
         )
     elif args.agents_config:
         try:
@@ -365,7 +474,8 @@ def main():
             ollama_model=args.ollama_model,
             step_delay=args.step_delay,
             budget=args.budget,
-            auto_approve_spawns=auto_approve_spawns
+            auto_approve_spawns=auto_approve_spawns,
+            graph_mode=args.graph_mode
         )
     elif args.task_id:
         personalities = []
@@ -388,7 +498,8 @@ def main():
             ollama_model=args.ollama_model,
             step_delay=args.step_delay,
             budget=args.budget,
-            auto_approve_spawns=auto_approve_spawns
+            auto_approve_spawns=auto_approve_spawns,
+            graph_mode=args.graph_mode
         )
     else:
         parser.print_help()
