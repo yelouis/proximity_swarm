@@ -1,6 +1,9 @@
 import os
 import json
 import logging
+import tarfile
+import datetime
+import glob
 from agent_runner import save_json, load_json
 
 GRAPH_DIR = os.path.join(os.getcwd(), ".proximity_swarm", "graph")
@@ -281,3 +284,54 @@ def similar_open_nodes(claim_text, threshold=0.8):
             if claim_text.lower() == c.lower():
                 similar.append(n["node_id"])
     return similar
+
+
+def garbage_collect_post_run():
+    """Compiles nodes into a snapshot, archives individual files, verifies integrity, and deletes node files."""
+    if not _guard_monitor("garbage_collect_post_run"):
+        return False
+        
+    nodes = _get_all_nodes()
+    if not nodes:
+        return True # Nothing to collect
+        
+    # 1. Rebuild snapshot
+    rebuild_snapshot()
+    
+    # 2. Archive files
+    archives_dir = os.path.join(GRAPH_DIR, "archives")
+    os.makedirs(archives_dir, exist_ok=True)
+    
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    archive_path = os.path.join(archives_dir, f"graph_archive_{timestamp}.tar.gz")
+    
+    node_files = glob.glob(os.path.join(GRAPH_DIR, "node_*.json"))
+    
+    try:
+        with tarfile.open(archive_path, "w:gz") as tar:
+            for f in node_files:
+                tar.add(f, arcname=os.path.basename(f))
+    except Exception as e:
+        logging.error(f"Failed to create graph archive: {e}")
+        return False
+        
+    # 3. Integrity verification
+    try:
+        snap_data = load_json(SNAPSHOT_FILE)
+        snap_nodes = snap_data.get("nodes", {})
+        if len(snap_nodes) != len(nodes):
+            logging.error(f"GC Aborted: Snapshot integrity verification failed. Expected {len(nodes)} nodes, got {len(snap_nodes)}.")
+            return False
+    except Exception as e:
+        logging.error(f"GC Aborted: Could not read snapshot for verification: {e}")
+        return False
+        
+    # 4. Safe deletion
+    for f in node_files:
+        try:
+            os.remove(f)
+        except OSError as e:
+            logging.error(f"Failed to remove {f}: {e}")
+            
+    logging.info(f"Successfully garbage collected {len(node_files)} nodes into {archive_path}")
+    return True

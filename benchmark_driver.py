@@ -34,7 +34,7 @@ def run_benchmark(spec_path, models):
         try:
             # Run headless
             process = subprocess.Popen(
-                ["python3", "supervisor.py", "--run-spec", temp_spec],
+                ["python3", "supervisor.py", "--run-spec", temp_spec, "--gc-workspace"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
@@ -42,6 +42,12 @@ def run_benchmark(spec_path, models):
             
             # Wait for it to finish
             stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                print(f"Supervisor failed with exit code {process.returncode}")
+                print(f"STDOUT:\n{stdout}")
+                print(f"STDERR:\n{stderr}")
+            elif stderr:
+                print(f"STDERR:\n{stderr}")
             
             elapsed = time.time() - start_time
             

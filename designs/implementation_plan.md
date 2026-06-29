@@ -606,6 +606,82 @@ all reachable. Verify against `user_journeys.md` and `user_journeys_collatz.md`.
 **Acceptance:** `supervisor.py --run-spec run.json` reproduces a run headlessly and emits artifacts;
 the benchmark driver produces a comparison table across ≥2 local models.
 
+### Phase 12 — Garbage Collection and Memory Bounding
+
+**Goal:** implement automatic cleanup systems for the logic graph, physical workspace, and episodic
+memory so the agentic framework can execute long-running headless benchmarks without storage bloat.
+Every deletion surface has explicit safeguards — the swarm must never destroy user data.
+
+#### 12.1 Episodic Memory Database (auto, low risk)
+
+Add `enforce_memory_limit(max_episodes=500)` to `memory_store.py`. Call it at the end of
+`save_episode` so the SQLite DB self-prunes with FIFO eviction (oldest rows deleted first). The cap
+is configurable via `--memory-limit N` on `supervisor.py` so the operator can raise or lower it.
+
+**Safeguards:**
+- Only internal vector embeddings / reflections are deleted — no user files involved.
+- Configurable cap avoids one-size-fits-all surprises.
+
+#### 12.2 Logic Graph Disk State (auto on teardown, low-medium risk)
+
+The `.proximity_swarm/graph/` directory produces one JSON file per node. Add
+`logic_graph.garbage_collect_post_run()` which:
+
+1. Reads all `node_*.json` files and compiles them into `snapshot.json`.
+2. **Archives** the individual node files into a timestamped `.tar.gz`
+   (e.g. `graph_archive_2026-06-28T12-00.tar.gz`) inside `.proximity_swarm/graph/archives/`.
+3. **Integrity-verifies** the snapshot by reading it back and confirming the node count matches.
+4. Only *then* deletes the individual `node_*.json` files.
+
+Call this during the engine teardown phase in `supervisor.py`.
+
+**Safeguards:**
+- **Archive-before-delete:** node data is always recoverable from the `.tar.gz`.
+- **Path containment:** the GC function is hardcoded to only touch files matching the glob
+  `node_*.json` inside `GRAPH_DIR`. It never touches `snapshot.json`, archives, or anything else.
+- **Integrity check:** if the round-trip verification fails, the GC aborts and logs an error
+  without deleting anything.
+
+#### 12.3 Workspace Files and Tombstones (opt-in only, HIGH risk)
+
+The tombstone system records `file_path` strings that originated from agent-generated code. A naive
+`os.remove(tombstone["file_path"])` could delete files outside the workspace if an agent
+hallucinated or produced a path-traversal string (e.g. `../../../important_file.py`). Therefore
+workspace file cleanup is **opt-in only** and heavily guarded.
+
+Build `cleanup_workspace()` (in a new `gc.py` module or `causal_tracer.py`) that:
+
+1. Reads `tombstones.json` and iterates through tombstones of type `file`.
+2. Resolves each path with `os.path.realpath()` and asserts it `.startswith(WORKSPACES_DIR)`.
+   If it resolves outside `.proximity_swarm/workspaces/`, **refuse to delete and log a warning**.
+3. Writes a `gc_manifest_<timestamp>.json` listing every file that will be deleted — a permanent
+   audit trail that survives even after the files are gone.
+4. Deletes the files.
+
+**Safeguards:**
+- **Opt-in only:** workspace cleanup requires an explicit `--gc-workspace` CLI flag or a manual
+  `POST /api/clean` call. It never runs automatically at the end of a benchmark.
+- **Path jail:** every resolved path must fall inside `WORKSPACES_DIR`. Paths that escape are
+  logged and skipped.
+- **Dry-run mode:** `--gc-dry-run` logs what *would* be deleted without calling `os.remove`, so
+  the operator can audit before committing.
+- **Deletion manifest:** the `gc_manifest_<timestamp>.json` file is written *before* any
+  deletions begin, providing a permanent record.
+
+#### Safeguard summary
+
+| Surface | Auto? | Key safeguards |
+|---|---|---|
+| Memory DB rows | ✅ Auto after `save_episode` | Configurable cap (`--memory-limit`), FIFO eviction, internal data only |
+| Graph node files | ✅ Auto on run teardown | Archive to `.tar.gz` first, glob-locked to `node_*.json`, integrity verify |
+| Workspace tombstone files | ❌ **Opt-in** (`--gc-workspace`) | Jail to `WORKSPACES_DIR`, dry-run mode, deletion manifest log |
+
+**Acceptance:** episodic memory stays within the configured cap. After a headless benchmark, the
+`graph` directory contains only `snapshot.json` + an archive `.tar.gz` (no loose `node_*.json`).
+Workspace cleanup only fires with `--gc-workspace`, respects the path jail, and writes a manifest.
+Tests in `test_gc.py` cover: memory rotation, graph archive+delete, path-jail rejection, dry-run
+mode, and manifest creation.
+
 ---
 
 ## 7. Frontend architecture reference

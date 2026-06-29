@@ -424,6 +424,9 @@ def main():
     parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     parser.add_argument("--auto-approve-spawns", action="store_true", default=None, help="Bypass manual operator approval for spawn requests")
     parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode (linear steps or graph)")
+    parser.add_argument("--memory-limit", type=int, default=500, help="Maximum number of episodic memories to keep in DB")
+    parser.add_argument("--gc-workspace", action="store_true", help="Garbage collect workspace tombstones at the end of the run")
+    parser.add_argument("--gc-dry-run", action="store_true", help="Dry-run mode for workspace garbage collection")
     args = parser.parse_args()
     
     if args.run_spec:
@@ -440,7 +443,7 @@ def main():
         args.llm_provider = spec.get("swarm_provider", args.llm_provider)
         args.graph_mode = spec.get("graph_mode", args.graph_mode)
         if "seed_roles" in spec:
-            args.agents_config = json.dumps([{"role": r["role"], "goal": spec.get("goal")} for r in spec["seed_roles"]])
+            args.agents_config = json.dumps([{"agent_id": f"{i+1:03d}", "role": r["role"], "task_id": spec.get("goal")} for i, r in enumerate(spec["seed_roles"])])
 
     auto_approve_spawns = args.auto_approve_spawns
     if auto_approve_spawns is None:
@@ -449,60 +452,76 @@ def main():
         else:
             auto_approve_spawns = True
 
-    if args.run_redundant:
-        run_redundant_demo(
-            interactive=args.interactive, 
-            deconflict=args.deconflict,
-            llm_provider=args.llm_provider,
-            ollama_model=args.ollama_model,
-            step_delay=args.step_delay,
-            budget=args.budget,
-            graph_mode=args.graph_mode
-        )
-    elif args.agents_config:
-        try:
-            initial_agents = json.loads(args.agents_config)
-        except Exception as e:
-            print(f"Error parsing --agents-config: {e}")
-            sys.exit(1)
-            
-        run_swarm(
-            initial_agents=initial_agents,
-            deconflict=args.deconflict,
-            interactive=args.interactive,
-            llm_provider=args.llm_provider,
-            ollama_model=args.ollama_model,
-            step_delay=args.step_delay,
-            budget=args.budget,
-            auto_approve_spawns=auto_approve_spawns,
-            graph_mode=args.graph_mode
-        )
-    elif args.task_id:
-        personalities = []
-        if args.personalities:
-            personalities = [p.strip() for p in args.personalities.split(",") if p.strip()]
-            
-        if personalities:
-            initial_agents = [
-                {"agent_id": f"{idx+1:03d}", "task_id": args.task_id, "personality": role}
-                for idx, role in enumerate(personalities)
-            ]
+    try:
+        if args.run_redundant:
+            run_redundant_demo(
+                interactive=args.interactive, 
+                deconflict=args.deconflict,
+                llm_provider=args.llm_provider,
+                ollama_model=args.ollama_model,
+                step_delay=args.step_delay,
+                budget=args.budget,
+                graph_mode=args.graph_mode
+            )
+        elif args.agents_config:
+            try:
+                initial_agents = json.loads(args.agents_config)
+            except Exception as e:
+                print(f"Error parsing --agents-config: {e}")
+                sys.exit(1)
+                
+            run_swarm(
+                initial_agents=initial_agents,
+                deconflict=args.deconflict,
+                interactive=args.interactive,
+                llm_provider=args.llm_provider,
+                ollama_model=args.ollama_model,
+                step_delay=args.step_delay,
+                budget=args.budget,
+                auto_approve_spawns=auto_approve_spawns,
+                graph_mode=args.graph_mode
+            )
+        elif args.task_id:
+            personalities = []
+            if args.personalities:
+                personalities = [p.strip() for p in args.personalities.split(",") if p.strip()]
+                
+            if personalities:
+                initial_agents = [
+                    {"agent_id": f"{idx+1:03d}", "task_id": args.task_id, "personality": role}
+                    for idx, role in enumerate(personalities)
+                ]
+            else:
+                initial_agents = [{"agent_id": "001", "task_id": args.task_id}]
+                
+            run_swarm(
+                initial_agents=initial_agents,
+                deconflict=args.deconflict,
+                interactive=args.interactive,
+                llm_provider=args.llm_provider,
+                ollama_model=args.ollama_model,
+                step_delay=args.step_delay,
+                budget=args.budget,
+                auto_approve_spawns=auto_approve_spawns,
+                graph_mode=args.graph_mode
+            )
         else:
-            initial_agents = [{"agent_id": "001", "task_id": args.task_id}]
+            parser.print_help()
+    finally:
+        # Engine Teardown GC
+        try:
+            import logic_graph
+            logic_graph.set_monitor(True)
+            logic_graph.garbage_collect_post_run()
+        except Exception as e:
+            print(f"Graph GC Error: {e}")
             
-        run_swarm(
-            initial_agents=initial_agents,
-            deconflict=args.deconflict,
-            interactive=args.interactive,
-            llm_provider=args.llm_provider,
-            ollama_model=args.ollama_model,
-            step_delay=args.step_delay,
-            budget=args.budget,
-            auto_approve_spawns=auto_approve_spawns,
-            graph_mode=args.graph_mode
-        )
-    else:
-        parser.print_help()
+        if args.gc_workspace:
+            try:
+                import workspace_gc
+                workspace_gc.cleanup_workspace(dry_run=args.gc_dry_run)
+            except Exception as e:
+                print(f"Workspace GC Error: {e}")
 
 
 if __name__ == "__main__":

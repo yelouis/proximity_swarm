@@ -157,8 +157,8 @@ def cosine_similarity(vec1, vec2):
     return dot / (mag1 * mag2)
 
 
-def save_episode(goal, role, status, steps, errors, deliverable_summary, reflection, model=DEFAULT_EMBED_MODEL):
-    """Saves a new execution episode into the database, generating embeddings."""
+def save_episode(goal, role, status, steps, errors, deliverable_summary, reflection, model=DEFAULT_EMBED_MODEL, max_episodes=500):
+    """Saves a new execution episode into the database, generating embeddings, and enforces memory limit."""
     init_db()
     
     # Generate embedding
@@ -175,6 +175,33 @@ def save_episode(goal, role, status, steps, errors, deliverable_summary, reflect
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (goal, role, status, steps_str, errors, deliverable_summary, reflection, embedding_str))
     conn.commit()
+    conn.close()
+    
+    enforce_memory_limit(max_episodes)
+
+
+def enforce_memory_limit(max_episodes=500):
+    """Deletes the oldest episodes if the total count exceeds max_episodes."""
+    if max_episodes <= 0:
+        return
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM episodic_memories")
+    count = cursor.fetchone()[0]
+    
+    if count > max_episodes:
+        to_delete = count - max_episodes
+        # Delete the oldest N rows
+        cursor.execute(f"""
+            DELETE FROM episodic_memories 
+            WHERE id IN (
+                SELECT id FROM episodic_memories 
+                ORDER BY id ASC 
+                LIMIT ?
+            )
+        """, (to_delete,))
+        conn.commit()
     conn.close()
 
 
