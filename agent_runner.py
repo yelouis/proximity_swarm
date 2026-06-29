@@ -509,7 +509,7 @@ class AgentRunner:
                     "status": "exploring",
                     "progress": 0,
                     "steps_completed": 0,
-                    "role_mode": "proposer",
+                    "role_mode": "both",
                     "files_completed": [],
                     "tools_used": [],
                     "active_node_id": None,
@@ -1230,8 +1230,9 @@ class AgentRunner:
         # Start-of-step state save to ensure coordinates (status, progress, current_step, files, tools) are synced
         save_json(self.state_file, self.state)
         
-        # Evaluate isolated spawn every 5 steps
-        self.evaluate_isolation_spawn()
+        # Evaluate isolated spawn every 5 steps (linear mode only)
+        if getattr(self, "graph_mode", "graph") != "graph":
+            self.evaluate_isolation_spawn()
 
         if getattr(self, "graph_mode", "graph") == "graph":
             self.execute_step_graph()
@@ -1240,39 +1241,75 @@ class AgentRunner:
 
     def execute_step_graph(self):
         import logic_graph
-        role_mode = self.state.get("role_mode", "proposer")
+        role_mode = self.state.get("role_mode", "both")
         active_node_id = self.state.get("active_node_id")
+        role_mode_active = self.state.get("role_mode_active")
         
-        # Proposer picks from frontier
-        if role_mode == "proposer" and not active_node_id:
-            frontier = logic_graph.frontier()
-            if not frontier:
-                print(f"Agent {self.agent_id} found no frontier nodes. Waiting.")
-                return
-            target = frontier[0]
-            approach = self.state.get("approach")
-            if approach:
-                approach_nodes = [n for n in frontier if n.get("approach") == approach]
-                if approach_nodes:
-                    target = approach_nodes[0]
-            
-            active_node_id = target["node_id"]
-            self.state["active_node_id"] = active_node_id
-            save_json(self.state_file, self.state)
-            
-        # Validator polls for proposed nodes
-        if role_mode == "validator" and not active_node_id:
-            proposed = logic_graph.nodes_by_status("proposed")
-            proposed = [n for n in proposed if n.get("kind") != "goal"]
-            approach = self.state.get("approach")
-            if approach:
-                proposed = [n for n in proposed if n.get("approach") == approach]
-            if proposed:
-                active_node_id = proposed[0]["node_id"]
-                self.state["active_node_id"] = active_node_id
-                save_json(self.state_file, self.state)
-            else:
-                return
+        if not active_node_id:
+            # 1. Validator action (or both)
+            if role_mode in ["validator", "both"]:
+                proposed = logic_graph.nodes_by_status("proposed")
+                proposed = [n for n in proposed if n.get("kind") != "goal"]
+                approach = self.state.get("approach")
+                if approach:
+                    proposed = [n for n in proposed if n.get("approach") == approach]
+                if proposed:
+                    active_node_id = proposed[0]["node_id"]
+                    self.state["active_node_id"] = active_node_id
+                    role_mode_active = "validator"
+                    self.state["role_mode_active"] = role_mode_active
+                    save_json(self.state_file, self.state)
+                    
+            # 2. Proposer action (or both)
+            if not active_node_id and role_mode in ["proposer", "both"]:
+                frontier = logic_graph.frontier()
+                if frontier:
+                    target = frontier[0]
+                    approach = self.state.get("approach")
+                    if approach:
+                        approach_nodes = [n for n in frontier if n.get("approach") == approach]
+                        if approach_nodes:
+                            target = approach_nodes[0]
+                    active_node_id = target["node_id"]
+                    self.state["active_node_id"] = active_node_id
+                    role_mode_active = "proposer"
+                    self.state["role_mode_active"] = role_mode_active
+                    save_json(self.state_file, self.state)
+                    
+            # 3. Terminal check - no work remains
+            if not active_node_id:
+                under_review = logic_graph.nodes_by_status("under_review")
+                approach = self.state.get("approach")
+                if approach:
+                    under_review = [n for n in under_review if n.get("approach") == approach]
+                
+                # Check if there are outstanding proposed/under_review nodes that this agent (as validator/both) should wait for
+                has_outstanding = False
+                if role_mode in ["validator", "both"]:
+                    proposed = [n for n in logic_graph.nodes_by_status("proposed") if n.get("kind") != "goal"]
+                    if approach:
+                        proposed = [n for n in proposed if n.get("approach") == approach]
+                    if proposed or under_review:
+                        has_outstanding = True
+                        
+                if not has_outstanding:
+                    print(f"Agent {self.agent_id} has no remaining graph work. Finalizing.")
+                    self.state["status"] = "completed"
+                    self.state["progress"] = 100
+                    save_json(self.state_file, self.state)
+                    try:
+                        import causal_tracer
+                        causal_tracer.log_state_transition(self.agent_id, "exploring", "completed")
+                    except Exception:
+                        pass
+                    return
+                else:
+                    print(f"Agent {self.agent_id} has no immediate active node, but waiting for outstanding nodes to review.")
+                    return
+
+        current_role = role_mode_active or role_mode
+        if current_role == "both":
+            current_role = "proposer"
 
         if not active_node_id:
             return
@@ -1283,7 +1320,7 @@ class AgentRunner:
             save_json(self.state_file, self.state)
             return
             
-        if role_mode == "proposer":
+        if current_role == "proposer":
             if self.llm_provider == "rules":
                 new_claim = f"Proposed step from {active_node_id}"
                 oracle = {"type": "shell", "spec": "echo ok"}
@@ -1297,11 +1334,11 @@ class AgentRunner:
                 existing_node_id = similar[0]
                 print(f"Agent {self.agent_id} found similar open node {existing_node_id}. Joining.")
                 self.state["active_node_id"] = existing_node_id
-                self.state["role_mode"] = "validator"
+                self.state["role_mode_active"] = "validator"
                 save_json(self.state_file, self.state)
                 return
                 
-            new_node_id = f"n_{self.agent_id}_{int(time.time())}"
+            new_node_id = logic_graph.next_node_id(self.agent_id)
             validated_nodes = logic_graph.nodes_by_status("validated")
             validated_ids = [n["node_id"] for n in validated_nodes]
             if not validated_ids:
@@ -1319,6 +1356,7 @@ class AgentRunner:
             })
             logic_graph.update_node(active_node_id, depends_on=node.get("depends_on", []) + [new_node_id])
             self.state["active_node_id"] = None
+            self.state["role_mode_active"] = None
             save_json(self.state_file, self.state)
             print(f"Agent {self.agent_id} PROPOSED node {new_node_id}")
             try:
@@ -1327,9 +1365,10 @@ class AgentRunner:
             except Exception:
                 pass
             
-        elif role_mode == "validator":
+        elif current_role == "validator":
             if node.get("status") != "proposed":
                 self.state["active_node_id"] = None
+                self.state["role_mode_active"] = None
                 save_json(self.state_file, self.state)
                 return
                 
@@ -1396,6 +1435,7 @@ class AgentRunner:
                 save_json(TOMBSTONES_FILE, tombstones)
                 
             self.state["active_node_id"] = None
+            self.state["role_mode_active"] = None
             save_json(self.state_file, self.state)
 
     def execute_step_linear(self):

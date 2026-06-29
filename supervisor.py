@@ -270,6 +270,11 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         if is_agent_sub_swarm_active(agent_id):
             launch_agent(agent_id, task_id, offset, personality, goal)
 
+    loop_start = time.time()
+    relaunch_counts = {}
+    MAX_RELAUNCHES_PER_AGENT = 10
+    MAX_TOTAL_DURATION = 120 # 2 minutes safety cap
+
     try:
         # Dynamic monitoring loop
         while True:
@@ -285,6 +290,27 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                 
             # Evaluate sub-swarm completions and transitions
             evaluate_sub_swarm_completion()
+            
+            # Global stop: Break immediately when the goal is proven
+            try:
+                import logic_graph
+                if logic_graph.validated_path_to_goal() is not None:
+                    goal_node = None
+                    for n in logic_graph._get_all_nodes().values():
+                        if n.get("kind") == "goal":
+                            goal_node = n
+                            break
+                    if goal_node and goal_node.get("status") == "validated":
+                        print("[Supervisor] Goal proven! Terminating remaining agent runners.")
+                        for pid, proc in list(running_processes.items()):
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                        running_processes.clear()
+                        break
+            except Exception as e:
+                print(f"[Supervisor] Error checking goal status: {e}")
             
             # Check if any initial agents should be launched now that their sub-swarm is active
             for idx, agent_info in enumerate(initial_agents):
@@ -323,6 +349,13 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                                         data = json.load(f)
                                     if data.get("status") in ["exploring", "syncing", "pending_termination"]:
                                         if is_agent_sub_swarm_active(agent_id):
+                                            relaunch_counts[agent_id] = relaunch_counts.get(agent_id, 0) + 1
+                                            if relaunch_counts[agent_id] > MAX_RELAUNCHES_PER_AGENT:
+                                                print(f"[Supervisor] Safety Guard: Agent {agent_id} exceeded relaunch limit ({MAX_RELAUNCHES_PER_AGENT}). Pruning.")
+                                                data["status"] = "dead"
+                                                with open(filepath, 'w') as f_w:
+                                                    json.dump(data, f_w, indent=2)
+                                                continue
                                             launch_agent(agent_id)
                                 except Exception:
                                     pass
@@ -331,6 +364,17 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             
             # 3. Exit condition: monitor daemon and all agent runners have stopped
             if not running_processes:
+                break
+                
+            # safety duration cap check
+            if time.time() - loop_start > MAX_TOTAL_DURATION:
+                print(f"[Supervisor] Safety Guard: Swarm execution exceeded max duration of {MAX_TOTAL_DURATION}s. Terminating.")
+                for pid, proc in list(running_processes.items()):
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                running_processes.clear()
                 break
                 
             time.sleep(0.5)

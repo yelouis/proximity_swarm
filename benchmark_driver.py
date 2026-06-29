@@ -17,7 +17,10 @@ def run_benchmark(spec_path, models):
     for model in models:
         print(f"\n{'='*50}\nEvaluating model: {model}\n{'='*50}")
         # Update spec for this model
-        spec["swarm_provider"] = "ollama"
+        if model == "rules":
+            spec["swarm_provider"] = "rules"
+        else:
+            spec["swarm_provider"] = "ollama"
         spec["model"] = model
         
         # Write temporary spec

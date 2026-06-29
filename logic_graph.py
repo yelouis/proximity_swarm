@@ -4,6 +4,7 @@ import logging
 import tarfile
 import datetime
 import glob
+import uuid
 from agent_runner import save_json, load_json
 
 GRAPH_DIR = os.path.join(os.getcwd(), ".proximity_swarm", "graph")
@@ -26,6 +27,12 @@ def init_graph(run_dir=None):
 
 def _node_path(node_id):
     return os.path.join(GRAPH_DIR, f"node_{node_id}.json")
+
+def next_node_id(agent_id=None):
+    suffix = uuid.uuid4().hex[:8]
+    if agent_id:
+        return f"n_{agent_id}_{suffix}"
+    return f"n_{suffix}"
 
 def add_node(node):
     node_id = node.get("node_id")

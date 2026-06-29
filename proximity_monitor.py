@@ -281,10 +281,41 @@ AUTO_APPROVE_SPAWNS = True
 
 def handle_spawn_requests(agents):
     """Process any active spawn requests from agents."""
+    active_agents = [a for a in agents if a.get("status") in ["exploring", "syncing", "pending_termination", "awaiting_child"]]
+    
+    # Dynamically read budget limit
+    current_budget = BUDGET
+    orchestrator_file = os.path.join(STATE_DIR, "orchestrator.json")
+    if os.path.exists(orchestrator_file):
+        try:
+            with open(orchestrator_file, 'r') as f_orc:
+                orc_state = json.load(f_orc)
+                if "budget_limit" in orc_state:
+                    current_budget = int(orc_state["budget_limit"])
+        except Exception:
+            pass
+            
+    total_tokens = sum(a.get("output_tokens", 0) for a in active_agents)
+
     for agent in agents:
         spawn_req = agent.get("spawn_request")
         if spawn_req:
             status = spawn_req.get("status", "pending")
+            
+            # Quota check
+            if status == "pending":
+                is_exceeded = False
+                if current_budget < 20 and len(active_agents) >= current_budget:
+                    is_exceeded = True
+                elif total_tokens >= current_budget:
+                    is_exceeded = True
+                    
+                if is_exceeded:
+                    logging.info(f"Denying spawn request for Agent {agent['id']} due to budget limit ({current_budget}).")
+                    agent["spawn_request"]["status"] = "rejected"
+                    save_agent_state(agent)
+                    continue
+
             if not AUTO_APPROVE_SPAWNS or INTERACTIVE:
                 if status == "pending":
                     # Wait for interactive approval in dashboard
@@ -689,7 +720,7 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5, graph_mode="graph")
                             "pct": round((subtree_used / max(stb, 1)) * 100, 1),
                         })
                     
-            if budget_exceeded:
+            if budget_exceeded or (current_budget < 20 and len(leafs) > current_budget):
                 import judge
                 judge_provider, judge_model = judge.select_judge_model(
                     None, None,
@@ -697,6 +728,30 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5, graph_mode="graph")
                     OLLAMA_MODEL
                 )
                 ranked = judge.rank_branches(leafs, judge_provider, judge_model)
+                
+                # Enforce hard pruning
+                to_prune = []
+                if current_budget < 20 and len(leafs) > current_budget:
+                    # Keep only top current_budget agents, kill the rest
+                    to_prune = [l for l in ranked[current_budget:]]
+                else:
+                    # Kill any leaf agent whose token count exceeds its node budget
+                    for leaf in leafs:
+                        leaf_tokens = leaf.get("output_tokens", 0)
+                        node_budget = leaf.get("token_budget", current_budget)
+                        if leaf_tokens > node_budget:
+                            to_prune.append(leaf)
+                            
+                for leaf in to_prune:
+                    logging.info(f"Pruning/Killing Agent {leaf['id']} due to budget/quota limit.")
+                    leaf["status"] = "dead"
+                    save_agent_state(leaf)
+                    try:
+                        import causal_tracer
+                        causal_tracer.log_state_transition(leaf["id"], "exploring", "dead", {"reason": "budget/quota exceeded"})
+                    except Exception:
+                        pass
+                
                 alert_data = {
                     "budget_exceeded": True,
                     "active_count": max_leaf_tokens,  # Holds max leaf output tokens for display
