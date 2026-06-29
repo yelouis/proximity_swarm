@@ -75,6 +75,7 @@ class TestLogicGraph(unittest.TestCase):
         self.assertIsNone(path) # goal depends on n3 which is proposed
         
         logic_graph.update_node("n3", status="validated", oracle={"type": "shell"})
+        logic_graph.update_node("g1", status="validated")
         path2 = logic_graph.validated_path_to_goal()
         self.assertIsNotNone(path2)
         self.assertIn("n1", path2)

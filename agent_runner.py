@@ -499,9 +499,30 @@ class AgentRunner:
             
         # Initialize new agent state
         if not self.task_id:
-            print(f"Error: Agent state file not found for {self.agent_id} and no --task-id was specified.")
-            sys.exit(1)
-            
+            if getattr(self, "graph_mode", "graph") == "graph":
+                state = {
+                    "id": self.agent_id,
+                    "parent_id": None,
+                    "parent_ids": [],
+                    "goal": self.custom_goal or "No goal specified",
+                    "personality": self.personality,
+                    "status": "exploring",
+                    "progress": 0,
+                    "steps_completed": 0,
+                    "role_mode": "proposer",
+                    "files_completed": [],
+                    "tools_used": [],
+                    "active_node_id": None,
+                    "chat_messages": []
+                }
+                if getattr(self, "sub_swarm_id", None):
+                    state["sub_swarm_id"] = self.sub_swarm_id
+                save_json(self.state_file, state)
+                return state
+            else:
+                print(f"Error: Agent state file not found for {self.agent_id} and no --task-id was specified.")
+                sys.exit(1)
+                
         tasks_data = load_json(MOCK_TASKS_FILE)
         if not tasks_data or self.task_id not in tasks_data["tasks"]:
             print(f"Error: Task ID '{self.task_id}' not found in mock_tasks.json.")
@@ -1225,7 +1246,6 @@ class AgentRunner:
         # Proposer picks from frontier
         if role_mode == "proposer" and not active_node_id:
             frontier = logic_graph.frontier()
-            print(f"DEBUG: frontier() = {frontier}, all nodes = {logic_graph._get_all_nodes().keys()}")
             if not frontier:
                 print(f"Agent {self.agent_id} found no frontier nodes. Waiting.")
                 return
@@ -1243,6 +1263,7 @@ class AgentRunner:
         # Validator polls for proposed nodes
         if role_mode == "validator" and not active_node_id:
             proposed = logic_graph.nodes_by_status("proposed")
+            proposed = [n for n in proposed if n.get("kind") != "goal"]
             approach = self.state.get("approach")
             if approach:
                 proposed = [n for n in proposed if n.get("approach") == approach]
@@ -1281,17 +1302,22 @@ class AgentRunner:
                 return
                 
             new_node_id = f"n_{self.agent_id}_{int(time.time())}"
+            validated_nodes = logic_graph.nodes_by_status("validated")
+            validated_ids = [n["node_id"] for n in validated_nodes]
+            if not validated_ids:
+                validated_ids = ["premise_0"]
             logic_graph.add_node({
                 "node_id": new_node_id,
                 "claim": new_claim,
                 "justification": "Proposed justification",
-                "depends_on": [active_node_id],
+                "depends_on": validated_ids,
                 "approach": self.state.get("approach", "A"),
                 "status": "proposed",
                 "kind": "lemma",
                 "oracle": oracle,
                 "provenance": {"proposed_by": self.agent_id}
             })
+            logic_graph.update_node(active_node_id, depends_on=node.get("depends_on", []) + [new_node_id])
             self.state["active_node_id"] = None
             save_json(self.state_file, self.state)
             print(f"Agent {self.agent_id} PROPOSED node {new_node_id}")

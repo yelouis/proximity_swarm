@@ -50,27 +50,51 @@ def _get_all_nodes():
     nodes = {}
     if not os.path.exists(GRAPH_DIR):
         return nodes
+    has_node_files = False
     for f in os.listdir(GRAPH_DIR):
         if f.startswith("node_") and f.endswith(".json"):
+            has_node_files = True
             data = load_json(os.path.join(GRAPH_DIR, f))
             if data and "node_id" in data:
                 nodes[data["node_id"]] = data
+    if not has_node_files and os.path.exists(SNAPSHOT_FILE):
+        snap = load_json(SNAPSHOT_FILE)
+        if snap and "nodes" in snap:
+            nodes = snap["nodes"]
     return nodes
 
 def frontier():
     nodes = _get_all_nodes()
-    frontier_ids = set()
+    goal_node = None
     for n in nodes.values():
         if n.get("kind") == "goal":
-            deps = n.get("depends_on", [])
-            if not deps and n.get("status") not in ["validated", "refuted"]:
-                frontier_ids.add(n["node_id"])
-            else:
-                for dep_id in deps:
-                    dep_node = nodes.get(dep_id)
-                    if not dep_node or dep_node.get("status") not in ["validated", "refuted"]:
-                        frontier_ids.add(dep_id)
-    return [nodes[nid] for nid in frontier_ids if nid in nodes]
+            goal_node = n
+            break
+    if not goal_node:
+        return []
+    frontier_nodes = []
+    visited = set()
+    def _traverse(nid):
+        if nid in visited:
+            return
+        visited.add(nid)
+        node = nodes.get(nid)
+        if not node:
+            return
+        if node.get("status") in ["validated", "refuted"]:
+            return
+        unvalidated_deps = []
+        for dep_id in node.get("depends_on", []):
+            dep_node = nodes.get(dep_id)
+            if not dep_node or dep_node.get("status") not in ["validated", "refuted"]:
+                unvalidated_deps.append(dep_id)
+        if not unvalidated_deps:
+            frontier_nodes.append(node)
+        else:
+            for dep_id in unvalidated_deps:
+                _traverse(dep_id)
+    _traverse(goal_node["node_id"])
+    return frontier_nodes
 
 def nodes_by_status(status):
     nodes = _get_all_nodes()
@@ -97,15 +121,18 @@ def validated_path_to_goal():
         node = nodes.get(nid)
         if not node:
             return False
-        if node.get("status") != "validated" and node.get("kind") not in ["premise", "goal"]:
-            return False
         if node.get("kind") == "premise":
-            return True
+            return node.get("status") == "validated"
+        if node.get("status") != "validated":
+            return False
+        deps = node.get("depends_on", [])
+        if not deps:
+            return False
         if node.get("kind") != "goal":
             oracle = node.get("oracle", {})
             if oracle.get("type") == "none":
                 return False
-        for dep in node.get("depends_on", []):
+        for dep in deps:
             if not _is_validated(dep, visited.copy()):
                 return False
         return True
@@ -195,6 +222,12 @@ def validate_graph():
                 if dep_node and dep_node.get("status") == "refuted":
                     violations.append(f"Validated node {nid} depends on refuted node {dep}")
                     
+    has_lemmas = any(n.get("kind") == "lemma" for n in nodes.values())
+    for nid, n in nodes.items():
+        if n.get("kind") != "premise" and (n.get("kind") == "lemma" or has_lemmas):
+            if not n.get("depends_on"):
+                violations.append(f"Non-premise node {nid} has empty depends_on")
+                    
     def has_cycle(start_id, visited, stack):
         visited.add(start_id)
         stack.add(start_id)
@@ -276,18 +309,28 @@ def to_artifact_json():
 
 
 def similar_open_nodes(claim_text, threshold=0.8):
+    from memory_store import tokenize
     nodes = _get_all_nodes()
     similar = []
+    tokens1 = set(tokenize(claim_text))
+    if not tokens1:
+        return similar
     for n in nodes.values():
-        if n.get("status") in ["proposed", "under_review", "exploring"]:
+        if n.get("status") in ["proposed", "under_review"]:
             c = n.get("claim", "")
-            if claim_text.lower() == c.lower():
+            tokens2 = set(tokenize(c))
+            if not tokens2:
+                continue
+            intersection = tokens1.intersection(tokens2)
+            union = tokens1.union(tokens2)
+            similarity = len(intersection) / len(union) if union else 0.0
+            if similarity >= threshold:
                 similar.append(n["node_id"])
     return similar
 
 
-def garbage_collect_post_run():
-    """Compiles nodes into a snapshot, archives individual files, verifies integrity, and deletes node files."""
+def garbage_collect_post_run(dry_run=False):
+    """Compiles nodes into a snapshot, archives individual files, verifies integrity, and deletes node files unless dry_run."""
     if not _guard_monitor("garbage_collect_post_run"):
         return False
         
@@ -327,6 +370,10 @@ def garbage_collect_post_run():
         return False
         
     # 4. Safe deletion
+    if dry_run:
+        logging.info(f"Dry-run active. Skipping deletion of {len(node_files)} node files.")
+        return True
+
     for f in node_files:
         try:
             os.remove(f)

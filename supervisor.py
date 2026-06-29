@@ -57,9 +57,23 @@ def evaluate_sub_swarm_completion():
         is_graph_complete = False
         try:
             import logic_graph
+            nodes = logic_graph._get_all_nodes()
+            for n in nodes.values():
+                if n.get("kind") == "goal" and n.get("status") != "validated":
+                    deps = n.get("depends_on", [])
+                    if deps and all(nodes.get(d, {}).get("status") == "validated" for d in deps):
+                        logic_graph.update_node(n["node_id"], status="validated")
+            
+            nodes = logic_graph._get_all_nodes()
             path = logic_graph.validated_path_to_goal()
             if path is not None:
-                is_graph_complete = True
+                goal_node = None
+                for n in nodes.values():
+                    if n.get("kind") == "goal":
+                        goal_node = n
+                        break
+                if goal_node and goal_node.get("status") == "validated":
+                    is_graph_complete = True
         except Exception:
             pass
             
@@ -112,7 +126,7 @@ def evaluate_sub_swarm_completion():
         print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
-def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False, graph_mode="graph"):
+def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False, graph_mode="graph", macro_goal="Run task"):
     """
     Launches a swarm dynamically, starting with initial_agents (list of dicts containing agent_id and task_id).
     Dynamically spawns runners for any children created during execution.
@@ -137,7 +151,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             }
         }
         state = {
-            "macro_goal": "Run task",
+            "macro_goal": macro_goal,
             "sub_swarms": sub_swarms
         }
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -335,7 +349,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             graph_json = logic_graph.to_artifact_json()
             mermaid_str = logic_graph.to_mermaid()
             
-            graph_dir = os.path.join(WORKSPACE_DIR, ".proximity_swarm", "graph")
+            graph_dir = logic_graph.GRAPH_DIR
             os.makedirs(graph_dir, exist_ok=True)
             
             json_path = os.path.join(graph_dir, f"run_{ts}.json")
@@ -361,8 +375,12 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                 
             memory_store.save_episode(
                 goal=macro_goal,
-                result={"graph": graph_json},
-                status="completed"
+                role="Orchestrator",
+                status="completed",
+                steps=[{"name": "Graph swarm run", "description": "Swarm run finished with graph validation."}],
+                errors="",
+                deliverable_summary=f"Graph size: {len(graph_json.get('nodes', {}))} nodes.",
+                reflection=""
             )
             print("[Supervisor] Episodic memory saved.")
             
@@ -426,9 +444,11 @@ def main():
     parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode (linear steps or graph)")
     parser.add_argument("--memory-limit", type=int, default=500, help="Maximum number of episodic memories to keep in DB")
     parser.add_argument("--gc-workspace", action="store_true", help="Garbage collect workspace tombstones at the end of the run")
-    parser.add_argument("--gc-dry-run", action="store_true", help="Dry-run mode for workspace garbage collection")
+    parser.add_argument("--gc-graph", action="store_true", help="Garbage collect graph node files at the end of the run")
+    parser.add_argument("--gc-dry-run", action="store_true", help="Dry-run mode for workspace and graph garbage collection")
     args = parser.parse_args()
     
+    spec_goal = None
     if args.run_spec:
         with open(args.run_spec, 'r') as f:
             if args.run_spec.endswith('.yaml') or args.run_spec.endswith('.yml'):
@@ -437,13 +457,21 @@ def main():
             else:
                 spec = json.load(f)
         
-        args.task_id = spec.get("goal") # Re-map for the mock logic
+        spec_goal = spec.get("goal")
         # For a full headless driver, we'd override other args
         args.budget = spec.get("budget", args.budget)
         args.llm_provider = spec.get("swarm_provider", args.llm_provider)
         args.graph_mode = spec.get("graph_mode", args.graph_mode)
         if "seed_roles" in spec:
-            args.agents_config = json.dumps([{"agent_id": f"{i+1:03d}", "role": r["role"], "task_id": spec.get("goal")} for i, r in enumerate(spec["seed_roles"])])
+            args.agents_config = json.dumps([
+                {
+                    "agent_id": f"{i+1:03d}",
+                    "personality": r["role"],
+                    "goal": spec_goal,
+                    "task_id": None
+                }
+                for i, r in enumerate(spec["seed_roles"])
+            ])
 
     auto_approve_spawns = args.auto_approve_spawns
     if auto_approve_spawns is None:
@@ -479,7 +507,8 @@ def main():
                 step_delay=args.step_delay,
                 budget=args.budget,
                 auto_approve_spawns=auto_approve_spawns,
-                graph_mode=args.graph_mode
+                graph_mode=args.graph_mode,
+                macro_goal=spec_goal if spec_goal else "Run task"
             )
         elif args.task_id:
             personalities = []
@@ -509,12 +538,13 @@ def main():
             parser.print_help()
     finally:
         # Engine Teardown GC
-        try:
-            import logic_graph
-            logic_graph.set_monitor(True)
-            logic_graph.garbage_collect_post_run()
-        except Exception as e:
-            print(f"Graph GC Error: {e}")
+        if getattr(args, "gc_graph", False):
+            try:
+                import logic_graph
+                logic_graph.set_monitor(True)
+                logic_graph.garbage_collect_post_run(dry_run=getattr(args, "gc_dry_run", False))
+            except Exception as e:
+                print(f"Graph GC Error: {e}")
             
         if args.gc_workspace:
             try:

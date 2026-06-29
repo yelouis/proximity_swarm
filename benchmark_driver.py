@@ -53,9 +53,28 @@ def run_benchmark(spec_path, models):
             
             # Read artifacts
             try:
-                import logic_graph
-                # The logic_graph reads directly from the graph directory on disk
-                graph_data = logic_graph.to_artifact_json()
+                import glob
+                graph_dir = os.path.join(".proximity_swarm", "graph")
+                snapshot_file = os.path.join(graph_dir, "snapshot.json")
+                run_files = sorted(glob.glob(os.path.join(graph_dir, "run_*.json")))
+                
+                graph_data = {}
+                if run_files:
+                    with open(run_files[-1], 'r') as rf:
+                        graph_data = json.load(rf)
+                elif os.path.exists(snapshot_file):
+                    with open(snapshot_file, 'r') as sf:
+                        snap = json.load(sf)
+                        graph_data = {"nodes": snap.get("nodes", {})}
+                        try:
+                            import logic_graph
+                            graph_data["validated_path"] = logic_graph.validated_path_to_goal()
+                        except Exception:
+                            graph_data["validated_path"] = []
+                else:
+                    import logic_graph
+                    graph_data = logic_graph.to_artifact_json()
+                    
                 nodes = graph_data.get("nodes", {})
                 validated_path = graph_data.get("validated_path") or []
             except Exception as e:
@@ -63,8 +82,8 @@ def run_benchmark(spec_path, models):
                 validated_path = []
                 print(f"Error reading logic graph: {e}")
                 
-            validated_steps = sum(1 for n in nodes.values() if n.get("status") == "valid")
-            dead_ends = sum(1 for n in nodes.values() if n.get("status") in ["invalid", "refuted"])
+            validated_steps = sum(1 for n in nodes.values() if n.get("status") == "validated")
+            dead_ends = sum(1 for n in nodes.values() if n.get("status") == "refuted")
             
             results[model] = {
                 "time_seconds": round(elapsed, 2),

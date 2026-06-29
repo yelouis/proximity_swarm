@@ -85,7 +85,11 @@ class TestProposeValidate(unittest.TestCase):
         new_nodes = [n for n in proposed_nodes if n["node_id"] not in ["g1", "sg1"]]
         self.assertEqual(len(new_nodes), 1)
         new_node = new_nodes[0]
-        self.assertEqual(new_node["depends_on"], ["sg1"])
+        self.assertEqual(new_node["depends_on"], ["p1"])
+        
+        # Check target node sg1 depends on new_node
+        target_node = logic_graph.get_node("sg1")
+        self.assertEqual(target_node["depends_on"], [new_node["node_id"]])
         
         # 2. Validator agent (mocked to pass)
         validator = AgentRunner(
