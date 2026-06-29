@@ -10,6 +10,12 @@
 > [`harness_design_document.md`](harness_design_document.md) (the observability UI spec), then this
 > file. Test journeys live in [`user_journeys.md`](user_journeys.md) and
 > [`user_journeys_collatz.md`](user_journeys_collatz.md).
+>
+> 🛑 **The current build does not work end-to-end.** A benchmark run produces **0 nodes /
+> Success=No** because the swarm declares victory on the first tick and the post-run GC deletes the
+> graph before anything can read it. The exact defects, with evidence and fixes, are catalogued in
+> **[§11 Known defects](#11-known-defects-blocking--fix-first)** — fix those before doing any new
+> Phase 2+ work.
 
 ---
 
@@ -35,6 +41,7 @@
 8. [Testing strategy](#8-testing-strategy)
 9. [Smallest-safe-commit discipline](#9-smallest-safe-commit-discipline)
 10. [Glossary](#10-glossary)
+11. [Known defects (BLOCKING — fix first)](#11-known-defects-blocking--fix-first)
 
 ---
 
@@ -791,3 +798,225 @@ GET `/api/state`, `/api/agents`, `/api/agents/<id>`, `/api/workspaces/<id>`, `/a
   Judge approves; also guarantees the swarm never goes extinct.
 - **Harness** — the headless engine + CLI/API + artifacts (the product); the dashboard is an
   optional observability lens.
+
+---
+
+## 11. Known defects (BLOCKING — fix first)
+
+> **Status as of this writing:** the propose/validate engine has been partially implemented
+> (`logic_graph.py`, `judge.py`, `oracle.py`, `agent_runner.execute_step_graph`, `supervisor.py
+> --run-spec`, `benchmark_driver.py`, `workspace_gc.py`), but a real run **does nothing useful**:
+> `python3 benchmark_driver.py --spec example_run.json --models gemma4:latest` reports
+> `Success=No, Nodes=0, Valid=0, Dead=0` in ~1.6 s. This section is the diagnosis. Every claim below
+> was **reproduced and verified** against the code on disk (line numbers are accurate at the time of
+> writing; if they've drifted, grep for the quoted snippet). Fix in the order given — **A → B → C**
+> are independently fatal; **D–H** are correctness bugs that surface once A–C are fixed.
+
+### Reproduction (the ground truth)
+
+```bash
+# from the repo root:
+rm -rf .proximity_swarm
+python3 supervisor.py --run-spec example_run.json --gc-workspace
+# …then inspect:
+ls .proximity_swarm/graph/                 # node_*.json are GONE; only snapshot.json + archives/
+python3 -c "import logic_graph as g; print(g.to_artifact_json()['nodes'])"   # {}  ← what the benchmark reads
+```
+
+Observed supervisor output (abridged):
+
+```
+Error: Task ID 'Prove the Collatz Conjecture for n <= 10' not found in mock_tasks.json.   # ← defect C
+[Supervisor] Launching Agent 001 runner subprocess...
+[Supervisor] Sub-Swarm swarm_001 completed via graph validation.                          # ← defect A (tick 1!)
+[Supervisor] Agent 001 runner subprocess exited.
+[Supervisor] Swarm execution completed successfully.
+[Supervisor] Failed to save observability artifacts: name 'WORKSPACE_DIR' is not defined  # ← defect D
+```
+
+After the run, `snapshot.json` still contains `{goal_0: proposed, premise_0: validated}`, but the
+per-node files are deleted and `to_artifact_json()` returns `{}` (defect B).
+
+---
+
+### Defect A — `validated_path_to_goal()` reports success on an unproven goal → instant teardown [BLOCKER]
+
+**Symptom.** The supervisor prints `Sub-Swarm … completed via graph validation` on the *first*
+monitor tick and tears the swarm down before any agent does real work (the ~1.6 s run). This is the
+primary reason "nothing happens."
+
+**Where.** `logic_graph.py:83-123` (`validated_path_to_goal`), consumed by
+`supervisor.py:57-74` (`evaluate_sub_swarm_completion`, which sets `is_graph_complete = True` when
+the path is not `None`).
+
+**Root cause.** In `_is_validated()` a `goal` node is exempted from the "must be `validated`" check
+(`if node.get("status") != "validated" and node.get("kind") not in ["premise","goal"]`), and a node
+with an **empty `depends_on`** passes the dependency loop vacuously. The seed graph is exactly
+`goal_0` (`status:"proposed"`, `depends_on:[]`). So the goal is treated as proven with zero
+supporting steps. **Verified in isolation:**
+
+```python
+# freshly-seeded UNPROVEN goal:
+validated_path_to_goal()  ->  ['goal_0']      # should be None
+```
+
+**Fix.**
+1. In `_is_validated`, a non-premise node is validated **only if its own `status == "validated"`**
+   *and* it has ≥1 dependency, all of which are validated. The `goal`/inference exemption must be
+   removed — a goal is proven only when a real validated sub-path reaches it.
+2. Premises (`kind:"premise"`) remain the only trivially-true roots.
+3. Defensive belt-and-suspenders in `supervisor.evaluate_sub_swarm_completion`: require both
+   `path is not None` **and** the goal node's `status == "validated"` before marking complete.
+
+**Verify.** The isolation snippet above returns `None`; a run no longer prints "completed via graph
+validation" on tick 1; completion only fires after a genuine validated path exists.
+
+---
+
+### Defect B — post-run GC deletes node files, but readers only read node files → 0 nodes [BLOCKER]
+
+**Symptom.** Even when nodes exist during the run, every reader *after* the run (the benchmark, any
+UI) sees an empty graph → `Nodes=0`.
+
+**Where.** `logic_graph.py:289` (`garbage_collect_post_run` archives to `.tar.gz` then
+`os.remove()`s every `node_*.json`), called unconditionally in `supervisor.py:511-517`'s `finally`.
+The readers `logic_graph._get_all_nodes` (`:49`) and `to_artifact_json` (`:272`) **only glob
+`node_*.json`** — they never read `snapshot.json` or the archive. `benchmark_driver.py:58` calls
+`to_artifact_json()` after the subprocess exits, so it always reads the post-GC (empty) state.
+**Verified:** after a run, `node files: []`, `snapshot nodes: {goal_0, premise_0}`,
+`to_artifact_json nodes: []`.
+
+**Fix (do all three).**
+1. Make readers snapshot-aware: `_get_all_nodes()` should fall back to `snapshot.json["nodes"]` when
+   there are no `node_*.json` files (the snapshot is the durable record after GC).
+2. Make the graph GC **opt-in and ordered last**: do not run `garbage_collect_post_run()`
+   unconditionally in `finally`. Gate it behind an explicit flag (e.g. `--gc-graph`), and only after
+   artifacts are emitted (defect D) and after any in-process reader has run.
+3. `benchmark_driver.py` should read the durable artifact (`snapshot.json` or the emitted
+   `run_<ts>.json`), not the live per-node files, so it is robust to GC regardless.
+
+**Verify.** After a run, `to_artifact_json()` (or the benchmark) returns the nodes that existed at
+end-of-run; toggling `--gc-graph` only affects whether `node_*.json` remain, never the reported
+counts.
+
+---
+
+### Defect C — the goal and seed roles never reach the swarm [BLOCKER]
+
+**Symptom.** `Error: Task ID 'Prove the Collatz Conjecture for n <= 10' not found in
+mock_tasks.json.`; the goal node's claim is the literal string `"Run task"`; the agent has no role
+and no goal.
+
+**Where (a chain of four mismappings).**
+1. `supervisor.py:440` — `args.task_id = spec.get("goal")` stuffs the free-text goal into
+   `--task-id`. The agent then tries a `mock_tasks.json` lookup and fails (`agent_runner.py:507`).
+2. `supervisor.py:446` — `seed_roles` are serialized into `agents_config` with key **`role`**, but
+   the launch path reads `agent_info.get("personality")` and `agent_info.get("goal")`
+   (`supervisor.py:253-254, 292-293`) — both `None`. The role `"Generalist"` is silently dropped.
+3. `supervisor.py:140 & 167` — the orchestrator `macro_goal` is hardcoded to `"Run task"`, and the
+   goal node is seeded from it, so the swarm's actual objective never enters the graph.
+4. Dispatch ambiguity: the run-spec sets **both** `args.task_id` and `args.agents_config`, and
+   `main()` happens to take the `agents_config` branch (`supervisor.py:466`) — fragile.
+
+**Fix.** In the `--run-spec` handler:
+- Set the orchestrator `macro_goal = spec["goal"]` and seed the goal node's `claim` from it (thread
+  the goal into `run_swarm`, e.g. a `macro_goal=` parameter, rather than the hardcoded `"Run task"`).
+- Build `initial_agents` with the keys the launcher actually reads:
+  `{"agent_id", "personality": role, "goal": spec["goal"], "task_id": None}` (in graph mode there is
+  no `mock_tasks.json` task — do **not** pass the goal string as `task_id`).
+- `launch_agent` already forwards `--goal`/`--personality`; ensure the dict it receives populates
+  them. Stop setting `args.task_id` from the spec.
+
+**Verify.** No "Task ID … not found" line; the seeded goal node's `claim` equals the spec goal; the
+agent process is launched with `--personality Generalist --goal "Prove the Collatz…"`.
+
+---
+
+### Defect D — `WORKSPACE_DIR` NameError → run artifacts never written [HIGH]
+
+**Symptom.** `[Supervisor] Failed to save observability artifacts: name 'WORKSPACE_DIR' is not
+defined`; no `run_<ts>.json` / `run_<ts>.md` is ever produced.
+
+**Where.** `supervisor.py:338` — `graph_dir = os.path.join(WORKSPACE_DIR, ".proximity_swarm",
+"graph")`, but `WORKSPACE_DIR` is never defined (the module only defines `STATE_DIR`).
+
+**Fix.** Use `STATE_DIR` (which already is `.proximity_swarm`): `graph_dir =
+os.path.join(STATE_DIR, "graph")`. Emit these artifacts **before** the graph GC runs (see defect B);
+this is the durable record the benchmark should read.
+
+**Verify.** A run writes `.proximity_swarm/graph/run_<ts>.json` and `.md`; no NameError.
+
+---
+
+### Defect E — benchmark counts the wrong status strings [HIGH]
+
+**Symptom.** Even with a healthy graph, the `Valid` column is always 0 and `Dead` undercounts.
+
+**Where.** `benchmark_driver.py:66-67`: `status == "valid"` and `status in ["invalid","refuted"]`.
+The system's canonical statuses (per `logic_graph.validate_graph` and the writers in
+`agent_runner.execute_step_graph:1342/1353`) are **`validated`** and **`refuted`**.
+
+**Fix.** `validated_steps = sum(1 for n in nodes.values() if n.get("status") == "validated")`;
+`dead_ends = sum(1 for n in nodes.values() if n.get("status") == "refuted")`. (Grep the codebase for
+the string `"valid"` to ensure no other reader has the same typo.)
+
+**Verify.** A run with k validated / m refuted nodes reports `Valid=k Dead=m`.
+
+---
+
+### Defect F — propose direction is inverted; the goal can never accrue support [HIGH]
+
+**Symptom.** Proposers create nodes that **depend on the goal**, so the goal's own `depends_on`
+stays empty forever and no validated sub-path can ever reach it — `success` is structurally
+impossible even after defect A is fixed.
+
+**Where.** `agent_runner.py:1288` creates the new node with `"depends_on": [active_node_id]`, where
+`active_node_id` is the frontier target (the goal, since `frontier()` returns the goal node for an
+empty-deps goal — `logic_graph.py:60-73`). Edges therefore point goal → step instead of step → goal.
+
+**Fix.** Reorient the relationship: a supporting step `S` should be a node the **target depends
+on**. When a proposer proposes `S` for target `T`: create `S` with `depends_on` = the premises /
+prior validated steps it builds on (not `T`), then append `S` to `T`'s `depends_on`
+(`update_node(T, depends_on=T.depends_on + [S])`). Update `frontier()` accordingly so it yields
+targets that still need support (the goal and any non-validated intermediate nodes), and the proposer
+grows the tree *toward* premises. Add a `validate_graph()` assertion that no non-premise node has
+empty `depends_on` once it has been proposed against.
+
+**Verify.** After a few proposer steps, the goal node's `depends_on` is non-empty and
+`validated_path_to_goal()` can return a real multi-node path once those steps validate.
+
+---
+
+### Defect G — leftover debug print [LOW]
+
+`agent_runner.py:1228` prints `DEBUG: frontier() = … all nodes = …` every proposer step. Remove it
+(or route through `logging.debug`).
+
+---
+
+### Defect H — graph GC is unconditional and unguarded by intent [MEDIUM]
+
+Independent of defect B's read path: `garbage_collect_post_run()` runs in `supervisor.py`'s
+`finally` on **every** invocation (including `--gc-dry-run`, and including normal interactive runs),
+silently destroying the inspectable per-node graph each time. Gate it behind an explicit flag,
+respect `--gc-dry-run` (archive + verify but skip deletion), and never run it before artifacts are
+emitted. Lesser companion: `logic_graph.similar_open_nodes` (`:278-286`) does exact lowercase string
+matching and checks a non-existent status `"exploring"` — replace with the TF-IDF/embedding match
+described in Phase 5 and the real statuses.
+
+---
+
+### Fix order & definition of done
+
+1. **A** (stop the instant false-completion) — without it the swarm never runs.
+2. **C** (goal + roles reach the agent) — without it the agent has nothing real to work on.
+3. **F** (correct edge direction) — without it a proof can never connect to the goal.
+4. **D** then **B** (emit artifacts, then make readers/GC snapshot-aware and opt-in).
+5. **E**, **G**, **H** (reporting + hygiene).
+
+**Definition of done for this clean-up:** `python3 benchmark_driver.py --spec example_run.json
+--models gemma4:latest` reports `Nodes > 0` (the graph survives to be read), no "completed via graph
+validation" on tick 1, no `WORKSPACE_DIR` NameError, and `Valid`/`Dead` reflect real
+`validated`/`refuted` counts. `python3 -m unittest discover -s tests` stays green, and
+`logic_graph.validate_graph()` returns `[]` on the post-run snapshot. (A *fully* successful Collatz
+proof is not required — only that the pipeline produces, validates, and reports a non-empty graph.)
