@@ -11,13 +11,15 @@
 > file. Test journeys live in [`user_journeys.md`](user_journeys.md) and
 > [`user_journeys_collatz.md`](user_journeys_collatz.md).
 >
-> 🛑 **The current build still does not work end-to-end.** The original 8 defects (**§11**) were
-> fixed and **verified resolved on 2026-06-29** (101/101 unit tests pass). But testing the fixed
-> build surfaced a **new failure mode**: instead of exiting instantly with 0 nodes, a run now
-> **hangs forever** — graph agents never finalize, so the supervisor relaunches them in a loop, and
-> isolation-spawning floods the swarm with helper agents. These post-fix regressions are catalogued
-> in **[§12 Post-fix regressions](#12-post-fix-regressions-blocking)** — fix those next. **Do not
-> re-fix §11.**
+> ✅ **The harness now runs end-to-end.** Defects A–H and regressions R1–R4 are fixed and
+> **verified 2026-06-29** (commits `0507ee7`, `417b845`; 101/101 unit tests pass; a headless `rules`
+> benchmark reports `Success=Yes, Nodes=17` and terminates cleanly in ~2.2s). Closed items are in
+> the **[§11 Resolution log](#11-resolution-log)**.
+>
+> 🛑 **But it does not yet do real reasoning.** The propose/validate/judge/oracle steps are **stubs**
+> — the engine builds a structurally valid but semantically *empty* graph and never queries the
+> local model. Wiring those to the LLM (plan Phases 2–4) is the next blocker, tracked in
+> **[§12 Open problems](#12-open-problems-blocking)**.
 
 ---
 
@@ -43,8 +45,8 @@
 8. [Testing strategy](#8-testing-strategy)
 9. [Smallest-safe-commit discipline](#9-smallest-safe-commit-discipline)
 10. [Glossary](#10-glossary)
-11. [Known defects (✅ RESOLVED 2026-06-29)](#11-known-defects-blocking--fix-first)
-12. [Post-fix regressions (BLOCKING)](#12-post-fix-regressions-blocking)
+11. [Resolution log (defects A–H, regressions R1–R4)](#11-resolution-log)
+12. [Open problems (BLOCKING)](#12-open-problems-blocking)
 
 ---
 
@@ -804,378 +806,88 @@ GET `/api/state`, `/api/agents`, `/api/agents/<id>`, `/api/workspaces/<id>`, `/a
 
 ---
 
-## 11. Known defects (BLOCKING — fix first)
+## 11. Resolution log
 
-> ✅ **RESOLVED & VERIFIED 2026-06-29** (commit `0507ee7`, "Fix known defects A through H"). All
-> eight defects below were re-checked against the code and by running it: the original symptoms
-> (instant tick-1 completion, 0 nodes, `WORKSPACE_DIR` NameError, `Task ID not found`, wrong status
-> counts, inverted edges, debug print, unconditional GC) are all gone, and 101/101 unit tests pass.
-> **Kept here for the record — do not re-fix.** Fixing these *exposed* a new failure mode, now
-> tracked in **[§12](#12-post-fix-regressions-blocking)**.
+Closed items, kept as a short record only — full detail is in git history and the prior revisions of
+this section. **Do not re-fix these.**
 
-> **Status as of this writing:** the propose/validate engine has been partially implemented
-> (`logic_graph.py`, `judge.py`, `oracle.py`, `agent_runner.execute_step_graph`, `supervisor.py
-> --run-spec`, `benchmark_driver.py`, `workspace_gc.py`), but a real run **does nothing useful**:
-> `python3 benchmark_driver.py --spec example_run.json --models gemma4:latest` reports
-> `Success=No, Nodes=0, Valid=0, Dead=0` in ~1.6 s. This section is the diagnosis. Every claim below
-> was **reproduced and verified** against the code on disk (line numbers are accurate at the time of
-> writing; if they've drifted, grep for the quoted snippet). Fix in the order given — **A → B → C**
-> are independently fatal; **D–H** are correctness bugs that surface once A–C are fixed.
+- **Defects A–H** — instant false-completion (A), post-run GC eating the graph (B), goal/roles never
+  reaching the swarm (C), `WORKSPACE_DIR` NameError (D), benchmark status-string mismatch (E),
+  inverted propose edges (F), leftover debug print (G), unconditional GC (H).
+  **Fixed in commit `0507ee7`; verified 2026-06-29** (101/101 unit tests pass; original symptoms
+  absent from a live run).
 
-### Reproduction (the ground truth)
+- **Regressions R1–R4** — infinite relaunch hang (R1), isolation-spawn storm (R2), no validator ever
+  assigned (R3), duplicate node ids (R4).
+  **Fixed in commit `417b845`; verified 2026-06-29** by a headless `rules` end-to-end run:
+  terminates cleanly in ~2.2 s ("Goal proven", safety caps **not** triggered), Agent 001 launched 2×
+  (was 29), 1 active agent / 0 isolation-spawns, artifacts written (no `WORKSPACE_DIR` error), 17
+  **unique** node ids, `validate_graph()` returns `[]`, `validated_path` length 17. The benchmark
+  (`python3 benchmark_driver.py --spec example_run.json --models rules`) reports
+  `Success=Yes, Nodes=17, Valid=17, Dead=0`.
 
-```bash
-# from the repo root:
-rm -rf .proximity_swarm
-python3 supervisor.py --run-spec example_run.json --gc-workspace
-# …then inspect:
-ls .proximity_swarm/graph/                 # node_*.json are GONE; only snapshot.json + archives/
-python3 -c "import logic_graph as g; print(g.to_artifact_json()['nodes'])"   # {}  ← what the benchmark reads
-```
-
-Observed supervisor output (abridged):
-
-```
-Error: Task ID 'Prove the Collatz Conjecture for n <= 10' not found in mock_tasks.json.   # ← defect C
-[Supervisor] Launching Agent 001 runner subprocess...
-[Supervisor] Sub-Swarm swarm_001 completed via graph validation.                          # ← defect A (tick 1!)
-[Supervisor] Agent 001 runner subprocess exited.
-[Supervisor] Swarm execution completed successfully.
-[Supervisor] Failed to save observability artifacts: name 'WORKSPACE_DIR' is not defined  # ← defect D
-```
-
-After the run, `snapshot.json` still contains `{goal_0: proposed, premise_0: validated}`, but the
-per-node files are deleted and `to_artifact_json()` returns `{}` (defect B).
+How the fixes landed (for reference): graph agents now reach a terminal `completed` status + the
+supervisor has a goal-proven global stop and `MAX_RELAUNCHES`/`MAX_TOTAL_DURATION` safety caps (R1);
+`evaluate_isolation_spawn` is gated to linear mode only, plus monitor budget enforcement/pruning
+(R2); default `role_mode` is `"both"` so a solo agent proposes *then* validates (R3);
+`logic_graph.next_node_id()` allocates uuid-based ids (R4).
 
 ---
 
-### Defect A — `validated_path_to_goal()` reports success on an unproven goal → instant teardown [BLOCKER]
+## 12. Open problems (BLOCKING)
 
-**Symptom.** The supervisor prints `Sub-Swarm … completed via graph validation` on the *first*
-monitor tick and tears the swarm down before any agent does real work (the ~1.6 s run). This is the
-primary reason "nothing happens."
+> **Status (2026-06-29).** The harness now runs end-to-end *mechanically* — propose → validate →
+> terminate → emit artifacts, within budget — but it does **not yet use the LLM to do any logic**.
+> The propose / validate / judge / oracle steps are stubs, so the "proof" it builds is structurally
+> valid and semantically empty. This is the next blocker toward the actual goal (amplifying a small
+> local model). Confirmed by code inspection and by `rules`/`ollama` runs producing identical trivial
+> graphs.
 
-**Where.** `logic_graph.py:83-123` (`validated_path_to_goal`), consumed by
-`supervisor.py:57-74` (`evaluate_sub_swarm_completion`, which sets `is_graph_complete = True` when
-the path is not `None`).
+### O1 — the propose/validate loop never calls the LLM (it is stubbed) [BLOCKER]
 
-**Root cause.** In `_is_validated()` a `goal` node is exempted from the "must be `validated`" check
-(`if node.get("status") != "validated" and node.get("kind") not in ["premise","goal"]`), and a node
-with an **empty `depends_on`** passes the dependency loop vacuously. The seed graph is exactly
-`goal_0` (`status:"proposed"`, `depends_on:[]`). So the goal is treated as proven with zero
-supporting steps. **Verified in isolation:**
-
-```python
-# freshly-seeded UNPROVEN goal:
-validated_path_to_goal()  ->  ['goal_0']      # should be None
-```
-
-**Fix.**
-1. In `_is_validated`, a non-premise node is validated **only if its own `status == "validated"`**
-   *and* it has ≥1 dependency, all of which are validated. The `goal`/inference exemption must be
-   removed — a goal is proven only when a real validated sub-path reaches it.
-2. Premises (`kind:"premise"`) remain the only trivially-true roots.
-3. Defensive belt-and-suspenders in `supervisor.evaluate_sub_swarm_completion`: require both
-   `path is not None` **and** the goal node's `status == "validated"` before marking complete.
-
-**Verify.** The isolation snippet above returns `None`; a run no longer prints "completed via graph
-validation" on tick 1; completion only fires after a genuine validated path exists.
-
----
-
-### Defect B — post-run GC deletes node files, but readers only read node files → 0 nodes [BLOCKER]
-
-**Symptom.** Even when nodes exist during the run, every reader *after* the run (the benchmark, any
-UI) sees an empty graph → `Nodes=0`.
-
-**Where.** `logic_graph.py:289` (`garbage_collect_post_run` archives to `.tar.gz` then
-`os.remove()`s every `node_*.json`), called unconditionally in `supervisor.py:511-517`'s `finally`.
-The readers `logic_graph._get_all_nodes` (`:49`) and `to_artifact_json` (`:272`) **only glob
-`node_*.json`** — they never read `snapshot.json` or the archive. `benchmark_driver.py:58` calls
-`to_artifact_json()` after the subprocess exits, so it always reads the post-GC (empty) state.
-**Verified:** after a run, `node files: []`, `snapshot nodes: {goal_0, premise_0}`,
-`to_artifact_json nodes: []`.
-
-**Fix (do all three).**
-1. Make readers snapshot-aware: `_get_all_nodes()` should fall back to `snapshot.json["nodes"]` when
-   there are no `node_*.json` files (the snapshot is the durable record after GC).
-2. Make the graph GC **opt-in and ordered last**: do not run `garbage_collect_post_run()`
-   unconditionally in `finally`. Gate it behind an explicit flag (e.g. `--gc-graph`), and only after
-   artifacts are emitted (defect D) and after any in-process reader has run.
-3. `benchmark_driver.py` should read the durable artifact (`snapshot.json` or the emitted
-   `run_<ts>.json`), not the live per-node files, so it is robust to GC regardless.
-
-**Verify.** After a run, `to_artifact_json()` (or the benchmark) returns the nodes that existed at
-end-of-run; toggling `--gc-graph` only affects whether `node_*.json` remain, never the reported
-counts.
-
----
-
-### Defect C — the goal and seed roles never reach the swarm [BLOCKER]
-
-**Symptom.** `Error: Task ID 'Prove the Collatz Conjecture for n <= 10' not found in
-mock_tasks.json.`; the goal node's claim is the literal string `"Run task"`; the agent has no role
-and no goal.
-
-**Where (a chain of four mismappings).**
-1. `supervisor.py:440` — `args.task_id = spec.get("goal")` stuffs the free-text goal into
-   `--task-id`. The agent then tries a `mock_tasks.json` lookup and fails (`agent_runner.py:507`).
-2. `supervisor.py:446` — `seed_roles` are serialized into `agents_config` with key **`role`**, but
-   the launch path reads `agent_info.get("personality")` and `agent_info.get("goal")`
-   (`supervisor.py:253-254, 292-293`) — both `None`. The role `"Generalist"` is silently dropped.
-3. `supervisor.py:140 & 167` — the orchestrator `macro_goal` is hardcoded to `"Run task"`, and the
-   goal node is seeded from it, so the swarm's actual objective never enters the graph.
-4. Dispatch ambiguity: the run-spec sets **both** `args.task_id` and `args.agents_config`, and
-   `main()` happens to take the `agents_config` branch (`supervisor.py:466`) — fragile.
-
-**Fix.** In the `--run-spec` handler:
-- Set the orchestrator `macro_goal = spec["goal"]` and seed the goal node's `claim` from it (thread
-  the goal into `run_swarm`, e.g. a `macro_goal=` parameter, rather than the hardcoded `"Run task"`).
-- Build `initial_agents` with the keys the launcher actually reads:
-  `{"agent_id", "personality": role, "goal": spec["goal"], "task_id": None}` (in graph mode there is
-  no `mock_tasks.json` task — do **not** pass the goal string as `task_id`).
-- `launch_agent` already forwards `--goal`/`--personality`; ensure the dict it receives populates
-  them. Stop setting `args.task_id` from the spec.
-
-**Verify.** No "Task ID … not found" line; the seeded goal node's `claim` equals the spec goal; the
-agent process is launched with `--personality Generalist --goal "Prove the Collatz…"`.
-
----
-
-### Defect D — `WORKSPACE_DIR` NameError → run artifacts never written [HIGH]
-
-**Symptom.** `[Supervisor] Failed to save observability artifacts: name 'WORKSPACE_DIR' is not
-defined`; no `run_<ts>.json` / `run_<ts>.md` is ever produced.
-
-**Where.** `supervisor.py:338` — `graph_dir = os.path.join(WORKSPACE_DIR, ".proximity_swarm",
-"graph")`, but `WORKSPACE_DIR` is never defined (the module only defines `STATE_DIR`).
-
-**Fix.** Use `STATE_DIR` (which already is `.proximity_swarm`): `graph_dir =
-os.path.join(STATE_DIR, "graph")`. Emit these artifacts **before** the graph GC runs (see defect B);
-this is the durable record the benchmark should read.
-
-**Verify.** A run writes `.proximity_swarm/graph/run_<ts>.json` and `.md`; no NameError.
-
----
-
-### Defect E — benchmark counts the wrong status strings [HIGH]
-
-**Symptom.** Even with a healthy graph, the `Valid` column is always 0 and `Dead` undercounts.
-
-**Where.** `benchmark_driver.py:66-67`: `status == "valid"` and `status in ["invalid","refuted"]`.
-The system's canonical statuses (per `logic_graph.validate_graph` and the writers in
-`agent_runner.execute_step_graph:1342/1353`) are **`validated`** and **`refuted`**.
-
-**Fix.** `validated_steps = sum(1 for n in nodes.values() if n.get("status") == "validated")`;
-`dead_ends = sum(1 for n in nodes.values() if n.get("status") == "refuted")`. (Grep the codebase for
-the string `"valid"` to ensure no other reader has the same typo.)
-
-**Verify.** A run with k validated / m refuted nodes reports `Valid=k Dead=m`.
-
----
-
-### Defect F — propose direction is inverted; the goal can never accrue support [HIGH]
-
-**Symptom.** Proposers create nodes that **depend on the goal**, so the goal's own `depends_on`
-stays empty forever and no validated sub-path can ever reach it — `success` is structurally
-impossible even after defect A is fixed.
-
-**Where.** `agent_runner.py:1288` creates the new node with `"depends_on": [active_node_id]`, where
-`active_node_id` is the frontier target (the goal, since `frontier()` returns the goal node for an
-empty-deps goal — `logic_graph.py:60-73`). Edges therefore point goal → step instead of step → goal.
-
-**Fix.** Reorient the relationship: a supporting step `S` should be a node the **target depends
-on**. When a proposer proposes `S` for target `T`: create `S` with `depends_on` = the premises /
-prior validated steps it builds on (not `T`), then append `S` to `T`'s `depends_on`
-(`update_node(T, depends_on=T.depends_on + [S])`). Update `frontier()` accordingly so it yields
-targets that still need support (the goal and any non-validated intermediate nodes), and the proposer
-grows the tree *toward* premises. Add a `validate_graph()` assertion that no non-premise node has
-empty `depends_on` once it has been proposed against.
-
-**Verify.** After a few proposer steps, the goal node's `depends_on` is non-empty and
-`validated_path_to_goal()` can return a real multi-node path once those steps validate.
-
----
-
-### Defect G — leftover debug print [LOW]
-
-`agent_runner.py:1228` prints `DEBUG: frontier() = … all nodes = …` every proposer step. Remove it
-(or route through `logging.debug`).
-
----
-
-### Defect H — graph GC is unconditional and unguarded by intent [MEDIUM]
-
-Independent of defect B's read path: `garbage_collect_post_run()` runs in `supervisor.py`'s
-`finally` on **every** invocation (including `--gc-dry-run`, and including normal interactive runs),
-silently destroying the inspectable per-node graph each time. Gate it behind an explicit flag,
-respect `--gc-dry-run` (archive + verify but skip deletion), and never run it before artifacts are
-emitted. Lesser companion: `logic_graph.similar_open_nodes` (`:278-286`) does exact lowercase string
-matching and checks a non-existent status `"exploring"` — replace with the TF-IDF/embedding match
-described in Phase 5 and the real statuses.
-
----
-
-### Fix order & definition of done
-
-1. **A** (stop the instant false-completion) — without it the swarm never runs.
-2. **C** (goal + roles reach the agent) — without it the agent has nothing real to work on.
-3. **F** (correct edge direction) — without it a proof can never connect to the goal.
-4. **D** then **B** (emit artifacts, then make readers/GC snapshot-aware and opt-in).
-5. **E**, **G**, **H** (reporting + hygiene).
-
-**Definition of done for this clean-up:** `python3 benchmark_driver.py --spec example_run.json
---models gemma4:latest` reports `Nodes > 0` (the graph survives to be read), no "completed via graph
-validation" on tick 1, no `WORKSPACE_DIR` NameError, and `Valid`/`Dead` reflect real
-`validated`/`refuted` counts. `python3 -m unittest discover -s tests` stays green, and
-`logic_graph.validate_graph()` returns `[]` on the post-run snapshot. (A *fully* successful Collatz
-proof is not required — only that the pipeline produces, validates, and reports a non-empty graph.)
-
----
-
-## 12. Post-fix regressions (BLOCKING)
-
-> **Status (2026-06-29).** After §11's fixes, the original symptoms are gone — but the harness
-> **still cannot complete a run**. The failure simply moved: instead of exiting instantly with 0
-> nodes, a run now **hangs indefinitely** and never emits a `run_<ts>.json` artifact. All four items
-> below were **reproduced and verified** on a headless deterministic run (the line numbers are
-> accurate at the time of writing; grep the quoted snippet if they drift). Recommended fix order:
-> **R1 → R2 → R3 → R4.**
-
-### Reproduction (the ground truth)
-
-A `rules`-provider run (deterministic, no Ollama) of `example_run.json`'s goal, killed after 22 s:
-
-```bash
-# temp spec with swarm_provider / judge_provider = "rules", graph_mode = "graph", one seed role
-rm -rf .proximity_swarm
-python3 -u supervisor.py --run-spec <rules_spec.json>     # never terminates — kill it after ~20s
-```
-
-Observed in 22 s: the supervisor **re-launched Agent 001 twenty-nine times**, spawned **19 distinct
-agents (001–019)** via isolation-spawning, printed **57** "Parallel sub-task helper" lines and
-endless `NEGOTIATION … Outcome: KEEP_BOTH`, and produced **zero `run_*.json` artifacts** (Phase 8 is
-never reached because the run never ends). The same hang is why a real Ollama benchmark now runs to
-its external `timeout=3600` instead of returning.
-
----
-
-### Regression R1 — graph agents never finalize → infinite supervisor relaunch [BLOCKER]
-
-**Symptom.** The run never terminates. The supervisor relaunches the same agent every ~0.5 s
-forever (measured: Agent 001 × 29 in 22 s); `run_swarm`'s exit condition `if not running_processes:
-break` is never reached, so Phase 8 artifact emission never runs.
+**Symptom.** Every proposed node carries the literal claim `"LLM Proposed claim"` and the oracle
+`{"type":"shell","spec":"echo ok"}` (which always passes), so every node validates and nothing is
+ever refuted (`Dead=0` always). The graph is correct in *shape* but carries no reasoning; behaviour
+is identical under `--llm-provider ollama` and `rules`.
 
 **Where / root cause.**
-- `agent_runner.main()` runs `for _ in range(args.steps): runner.execute_step()` (~`agent_runner.py:2169`)
-  then the process exits. In graph mode `execute_step_graph` **never sets a terminal status** — it
-  only ever does `self.state["active_node_id"] = None`. So the agent's state file is left at
-  `status:"exploring"` when the process exits.
-- The supervisor's "relaunch active agents" block (`supervisor.py:311-327`) re-launches **any** agent
-  whose persisted `status` is in `["exploring","syncing","pending_termination"]` and isn't currently
-  running. An exited-but-`"exploring"` agent therefore gets relaunched on every tick, indefinitely.
+- **Proposer (no real generation):** `agent_runner.execute_step_graph`, proposer branch
+  (~`agent_runner.py:1324-1330`) — the non-`rules` path is a placeholder: a `# LLM call` comment with
+  `new_claim = "LLM Proposed claim"` and a hardcoded `echo ok` oracle. No prompt is built and no
+  model is queried (contrast `heal_file`, which *does* call the model).
+- **Judge (no real checking):** `judge.validate_step` (`judge.py:27-42`) returns `{"valid": True}`
+  for every provider — "Mocking LLM based judge for now". `resolve_collision` and `rank_branches`
+  are likewise stubs.
+- **Oracle:** proposers only ever emit a trivial `shell: echo ok` oracle, so
+  `oracle.evaluate_oracle` always passes; the `numeric` / `symbolic` / `checker_model` paths in
+  `oracle.py` are never exercised by the agent.
+
+**Why it matters.** This *is* the product thesis (§0): a weak model **proposes** steps and a stricter
+check **validates** them. Until both are wired to the local model, the harness cannot amplify
+anything, can never reject a bad step, and "Success" is meaningless. This is plan **Phases 2 + 3 +
+4**, now the priority.
 
 **Fix.**
-1. **Give graph agents a terminal condition.** In `execute_step_graph` (or a new
-   `finalize_graph()`), when a proposer/validator has no work — `logic_graph.frontier()` is empty and
-   there are no `proposed`/`under_review` nodes in the agent's `approach` — set
-   `self.state["status"] = "completed"` (reuse `finalize_or_await`) and persist it. A completed agent
-   is not relaunched (the supervisor only relaunches the three active statuses).
-2. **Add a global stop in the supervisor.** In `run_swarm`'s monitor loop, after
-   `evaluate_sub_swarm_completion()`, break when the goal is proven —
-   `logic_graph.validated_path_to_goal() is not None` **and** the goal node's `status == "validated"`
-   — then fall through to teardown + Phase 8 emission.
-3. **Safety cap.** Add a max-wall-clock / max-total-relaunch guard to the loop so a stuck run exits
-   and still emits artifacts rather than hanging forever.
+1. **Proposer → real generation (Phase 2).** Replace the stub with a fresh-context prompt (goal + the
+   target frontier node's claim + its validated ancestors only — mirror `heal_file`'s reset-context
+   discipline) that asks the local model for one atomic next step: `claim`, `justification`,
+   `depends_on`, and a concrete `oracle.spec`. Parse it into the node. Keep the `rules` path as the
+   deterministic test stub.
+2. **Oracle → real checks (Phase 4).** Have the proposer emit a *real* oracle (e.g. a `numeric`
+   Python check for a Collatz sub-claim) and let `oracle.evaluate_oracle` run it; reserve
+   `checker_model` for steps no executable oracle can check.
+3. **Judge → real local evaluation (Phase 3).** Implement `judge.validate_step` for `checker_model`
+   nodes: a strict-rubric, fresh-context query to the strongest **local** model (`select_judge_model`
+   already enforces local-only). It must be able to return `valid: False` so steps can be refuted.
 
-**Verify.** A `rules` run of `example_run.json` **terminates on its own**, prints "Swarm execution
-completed successfully", and writes `run_<ts>.json`. No agent is relaunched more than a small bounded
-number of times.
+**Acceptance.** An `ollama` run on a checkable goal produces nodes whose `claim`/`justification` are
+model-generated; at least one node is **refuted** by a failing oracle/judge (proving the validate
+gate has teeth) so `Dead > 0` is reachable; the graph-path self-healing loop fires on a failing
+shell/numeric oracle; `rules` runs stay deterministic and the suite stays green.
 
----
+### O2 — validation can never fail in the graph loop [HIGH] (subsumed by O1)
 
-### Regression R2 — isolation-spawn storm in graph mode [HIGH]
-
-**Symptom.** A lone agent floods the swarm with helper agents that collide and `KEEP_BOTH` forever
-(measured: 19 agents, 57 helper-spawn references in 22 s), compounding R1's hang and polluting the
-graph with `Parallel sub-task helper` nodes that never validate.
-
-**Where / root cause.** `execute_step` calls `self.evaluate_isolation_spawn()` **unconditionally on
-every step, in graph mode**, right before branching to `execute_step_graph`
-(~`agent_runner.py:1244`). `evaluate_isolation_spawn` (`agent_runner.py:495`) treats a single agent
-as "semantically isolated" and requests a generic helper spawn; with `auto_approve_spawns=True` (the
-default for `--run-spec`) the monitor approves them, and each helper repeats the behavior. The
-`--budget` active-agent cap did **not** bound this in the run (19 agents created under a budget of 4).
-
-**Fix.**
-1. In graph mode, **do not** drive divergence through the legacy `evaluate_isolation_spawn`. Either
-   skip it entirely in graph mode, or gate it to fire only every *K* steps **and** only when the
-   active-agent count is below `--budget`.
-2. When the swarm *does* spawn in graph mode, it should open a **new `approach` branch** (a distinct
-   line of attack on the frontier), not a generic `Parallel sub-task helper` clone.
-3. **Make the budget cap a hard ceiling.** Confirm the monitor's quota enforcer
-   (`proximity_monitor.get_active_leaf_agents` / `rank_leaf_agents_llm` / pruning) actually denies or
-   prunes spawns past `--budget`; today it let 19 agents exist under a cap of 4.
-
-**Verify.** A `rules` run keeps the active-agent count ≤ `--budget`; no unbounded helper cascade; the
-graph contains real proposed/validated steps, not a pile of `Parallel sub-task helper` nodes.
-
----
-
-### Regression R3 — no validator is ever assigned → nothing validates [HIGH]
-
-**Symptom.** Even with R1/R2 fixed, `example_run.json` (one seed role) produces only `proposed`
-nodes — `Valid=0`, `Success=No` — because no agent ever validates.
-
-**Where / root cause.** `agent_runner.load_or_init_state` seeds every graph agent with
-`role_mode:"proposer"` (the `--run-spec` seeding in `supervisor.py` does not set `role_mode`). The
-validator branch of `execute_step_graph` only runs when `role_mode == "validator"`, and the only
-thing that flips a proposer to validator is the "found a similar open node" dedup path
-(`agent_runner.py:~1300`). With a single proposer, proposals are never reviewed.
-
-**Fix.** Ensure every swarm has at least one validator. Options (pick one):
-- Support a `role_mode:"both"` (a solo agent proposes, then on its next step validates an outstanding
-  `proposed` node in its approach) and default a single-seed run to it; **or**
-- When seeding from `seed_roles`, assign `role_mode` so there is ≥1 proposer **and** ≥1 validator
-  (e.g. alternate, or auto-add a validator when only one role is given); **or**
-- Update `example_run.json` (and the run-spec seeding) to include both a proposer and a validator
-  role.
-
-**Verify.** A run of the (one- or two-role) spec yields some `validated` nodes; the benchmark reports
-`Valid > 0`, and a trivially-provable goal can reach `Success=Yes`.
-
----
-
-### Regression R4 — duplicate node IDs from second-resolution timestamps [MEDIUM]
-
-**Symptom.** Two proposals within the same wall-clock second get the **same** `node_id` and silently
-overwrite each other (observed: two `PROPOSED node n_001_1782746097` lines with identical ids).
-
-**Where / root cause.** `agent_runner.py:1304`:
-`new_node_id = f"n_{self.agent_id}_{int(time.time())}"` — second resolution collides under the fast
-loop.
-
-**Fix.** Allocate unique ids centrally. Add `logic_graph.next_node_id()` (e.g. `uuid4().hex[:12]`,
-or a persisted monotonic counter / `max(existing)+1`) and use it for every `add_node`. This also fits
-the node-ownership model in §4.4.
-
-**Verify.** Rapid proposals always create distinct node files; `validate_graph()` shows no lost
-nodes; node count grows monotonically with proposals.
-
----
-
-### Definition of done for §12
-
-A headless **`rules`** run of `example_run.json` (or a 2-role variant per R3):
-- **terminates on its own** within a bounded time and prints "Swarm execution completed
-  successfully";
-- writes a `run_<ts>.json` artifact (and `.md`), and `logic_graph.validate_graph()` returns `[]` on
-  the snapshot;
-- keeps the active-agent count **≤ `--budget`** (no spawn storm) and relaunches no agent more than a
-  small bounded number of times;
-- produces unique node ids and **`Valid > 0`** (validation actually happens);
-- `python3 -m unittest discover -s tests` stays green.
-
-Then re-run the real benchmark: `python3 benchmark_driver.py --spec example_run.json --models
-gemma4:latest` should **return without hitting the external timeout**, reporting `Nodes > 0` and a
-non-zero `Valid` count.
+Because oracles are always `echo ok` and the judge always returns valid, `REFUTED`/`Dead` is
+structurally impossible and the self-healing loop (`run_verification_loop`) is never reached from the
+graph path. Fixing O1 resolves this — and add a regression test that a node with a deliberately
+failing oracle ends up `refuted` and tombstoned.
