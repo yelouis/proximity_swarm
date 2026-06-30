@@ -152,5 +152,53 @@ class TestProposeValidate(unittest.TestCase):
         # Make sure validator's progress didn't advance
         self.assertEqual(validator.state.get("progress", 0), 0)
 
+    def test_numeric_oracle_self_healing_graph(self):
+        # 1. Add a proposed node with a numeric oracle that initially fails
+        logic_graph.add_node({
+            "node_id": "heal_node",
+            "kind": "lemma",
+            "claim": "Calculate sequence",
+            "justification": "Initial justification",
+            "depends_on": ["p1"],
+            "approach": "A",
+            "status": "proposed",
+            "oracle": {
+                "type": "numeric",
+                "spec": "assert 1 + 1 == 3"
+            }
+        })
+        
+        validator = AgentRunner(
+            agent_id="501",
+            task_id="task_jwt_auth",
+            llm_provider="ollama", # non-rules to trigger self-healing
+            graph_mode="graph"
+        )
+        validator.state["role_mode"] = "validator"
+        validator.state["status"] = "exploring"
+        validator.state["active_node_id"] = "heal_node"
+        save_json(validator.state_file, validator.state)
+        
+        # Mock heal_file to provide a passing python assertion
+        def fake_heal(filename, step, err):
+            return "assert 1 + 1 == 2"
+        validator.heal_file = fake_heal
+        
+        # Mock is_ollama_running to return True to allow healing loop
+        import agent_runner
+        old_is_ollama = agent_runner.is_ollama_running
+        agent_runner.is_ollama_running = lambda: True
+        
+        try:
+            validator.execute_step()
+            
+            # The node should now be validated
+            healed_node = logic_graph.get_node("heal_node")
+            self.assertEqual(healed_node["status"], "validated")
+            # And the spec should be updated to the passing assertion
+            self.assertEqual(healed_node["oracle"]["spec"], "assert 1 + 1 == 2")
+        finally:
+            agent_runner.is_ollama_running = old_is_ollama
+
 if __name__ == "__main__":
     unittest.main()

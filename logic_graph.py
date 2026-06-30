@@ -156,6 +156,25 @@ def validated_path_to_goal():
         return list(path)
     return None
 
+def get_validated_ancestors(node_id):
+    nodes = _get_all_nodes()
+    ancestors = []
+    visited = set()
+    def _dfs(nid):
+        if nid in visited:
+            return
+        visited.add(nid)
+        node = nodes.get(nid)
+        if not node:
+            return
+        if node.get("status") == "validated" and nid != node_id:
+            ancestors.append(node)
+        for dep_id in node.get("depends_on", []):
+            _dfs(dep_id)
+    _dfs(node_id)
+    return ancestors
+
+
 
 
 def merge_nodes(survivor_id, loser_ids):

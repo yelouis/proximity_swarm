@@ -128,13 +128,13 @@ def is_ollama_running():
 
 def fallback_classify_phase(step_name, step_description):
     text = (step_name + " " + step_description).lower()
-    if any(k in text for k in ["bug", "fix", "debug", "error", "fail", "issue", "crash", "compile", "test", "resolve"]):
-        return "Debugging"
-    if any(k in text for k in ["doc", "read", "writeup", "report", "comment", "markdown", "synthesize", "explain"]):
-        return "Documentation"
+    if any(k in text for k in ["bug", "fix", "debug", "error", "fail", "issue", "crash", "compile", "test", "resolve", "validate", "check", "verify", "oracle"]):
+        return "Validating"
+    if any(k in text for k in ["doc", "read", "writeup", "report", "comment", "markdown", "synthesize", "explain", "conclusion", "summary"]):
+        return "Synthesizing"
     if any(k in text for k in ["init", "plan", "setup", "initialize", "design", "requirements", "prepare", "analysis", "architect"]):
         return "Planning"
-    return "Coding"
+    return "Exploring"
 
 
 def classify_phase(agent):
@@ -154,11 +154,11 @@ def classify_phase(agent):
         headers = {"Content-Type": "application/json"}
         prompt = (
             f"Classify the following agent task step into exactly one of these four phases: "
-            f"Planning, Coding, Debugging, Documentation.\n"
+            f"Planning, Exploring, Validating, Synthesizing.\n"
             f"Step Name: {step_name}\n"
             f"Step Description: {step_description}\n\n"
             f"Respond with a JSON object containing a single key 'phase' whose value is exactly one of the four strings: "
-            f"'Planning', 'Coding', 'Debugging', 'Documentation'."
+            f"'Planning', 'Exploring', 'Validating', 'Synthesizing'."
         )
         body = {
             "model": OLLAMA_MODEL,

@@ -1324,10 +1324,72 @@ class AgentRunner:
             if self.llm_provider == "rules":
                 new_claim = f"Proposed step from {active_node_id}"
                 oracle = {"type": "shell", "spec": "echo ok"}
+                justification = "Proposed justification"
+                validated_nodes = logic_graph.nodes_by_status("validated")
+                depends_on = [n["node_id"] for n in validated_nodes]
+                if not depends_on:
+                    depends_on = ["premise_0"]
             else:
-                # LLM call
-                new_claim = "LLM Proposed claim"
-                oracle = {"type": "shell", "spec": "echo ok"}
+                validated_ancestors = logic_graph.get_validated_ancestors(active_node_id)
+                ancestors_desc = ""
+                for n in validated_ancestors:
+                    ancestors_desc += f"- Node {n['node_id']} ({n.get('kind', 'lemma')}): '{n.get('claim', '')}'\n  Justification: {n.get('justification', '')}\n"
+                if not ancestors_desc:
+                    ancestors_desc = "None (this is the starting step, build from the global goal/premises)."
+                
+                prompt = (
+                    f"You are a Proposer Agent {self.agent_id} (Role: {self.state.get('personality', 'Generalist')}) working to solve the goal: '{self.state.get('goal', '')}'.\n"
+                    f"We are trying to prove or resolve the following target node:\n"
+                    f"Target Node ID: {active_node_id}\n"
+                    f"Target Claim: '{node.get('claim', '')}'\n"
+                    f"Target Justification: '{node.get('justification', '')}'\n\n"
+                    f"Here are the validated ancestor nodes (premises or proven steps) you can build upon:\n"
+                    f"{ancestors_desc}\n\n"
+                    f"Your job is to propose exactly one atomic step (lemma, subgoal, or code change) that helps resolve the target node.\n"
+                    f"You must return a JSON object with the following fields:\n"
+                    f"1. 'claim' (string): The assertion or claim of this step.\n"
+                    f"2. 'justification' (string): Brief explanation, reasoning, or code justification supporting the claim.\n"
+                    f"3. 'depends_on' (array of strings): A list of node IDs from the validated ancestors above that this new step directly builds upon. If it is a starting step, use 'premise_0'.\n"
+                    f"4. 'oracle' (object): How to validate this claim. Must contain:\n"
+                    f"   - 'type' (string): one of 'shell', 'numeric', 'symbolic', 'checker_model', 'none'. Use 'numeric' for Python math checks, 'shell' for scripts, or 'checker_model' if it can only be verified by an LLM Judge.\n"
+                    f"   - 'spec' (string): For 'shell', the shell command (e.g. 'pytest tests/test_math.py'). For 'numeric', python code that prints True or exits 0 when valid (e.g. 'assert 2 + 2 == 4'). For 'symbolic', python SymPy code. For 'checker_model', the rubric/question for the Judge to verify.\n\n"
+                    f"Respond strictly in JSON format matching the schema described above."
+                )
+                
+                provider = self.llm_provider
+                if not provider:
+                    if os.environ.get("GEMINI_API_KEY"):
+                        provider = "gemini"
+                    elif is_ollama_running():
+                        provider = "ollama"
+                    else:
+                        provider = "rules"
+                        
+                res = None
+                try:
+                    if provider == "gemini":
+                        res = call_gemini_api(prompt)
+                    elif provider == "ollama":
+                        res = call_ollama_api(prompt, model=self.ollama_model)
+                except Exception as ex:
+                    print(f"  [Proposer LLM Error]: {ex}")
+                    
+                if res and isinstance(res, dict) and "claim" in res:
+                    new_claim = res.get("claim", "LLM Proposed claim")
+                    oracle = res.get("oracle", {"type": "shell", "spec": "echo ok"})
+                    justification = res.get("justification", "Proposed justification")
+                    depends_on = res.get("depends_on", [])
+                    if not isinstance(depends_on, list):
+                        depends_on = [depends_on]
+                    valid_ancestor_ids = [n["node_id"] for n in validated_ancestors] + ["premise_0"]
+                    depends_on = [d for d in depends_on if d in valid_ancestor_ids]
+                    if not depends_on:
+                        depends_on = ["premise_0"]
+                else:
+                    new_claim = "LLM Proposed claim (Fallback)"
+                    oracle = {"type": "shell", "spec": "echo ok"}
+                    justification = "Proposed justification (Fallback)"
+                    depends_on = ["premise_0"]
                 
             similar = logic_graph.similar_open_nodes(new_claim)
             if similar:
@@ -1339,15 +1401,11 @@ class AgentRunner:
                 return
                 
             new_node_id = logic_graph.next_node_id(self.agent_id)
-            validated_nodes = logic_graph.nodes_by_status("validated")
-            validated_ids = [n["node_id"] for n in validated_nodes]
-            if not validated_ids:
-                validated_ids = ["premise_0"]
             logic_graph.add_node({
                 "node_id": new_node_id,
                 "claim": new_claim,
-                "justification": "Proposed justification",
-                "depends_on": validated_ids,
+                "justification": justification,
+                "depends_on": depends_on,
                 "approach": self.state.get("approach", "A"),
                 "status": "proposed",
                 "kind": "lemma",
@@ -1402,6 +1460,54 @@ class AgentRunner:
                 passed = not self.state.get("force_fail", False)
                 if node_oracle_type == "none":
                     passed = False
+            
+            if not passed and self.llm_provider != "rules" and node_oracle_type in ["shell", "numeric"]:
+                primary_file = None
+                verification_cmd = None
+                
+                if node_oracle_type == "numeric":
+                    primary_file = f"check_{active_node_id}.py"
+                    file_path = os.path.join(self.workspace_dir, primary_file)
+                    with open(file_path, "w") as fh:
+                        fh.write(node.get("oracle", {}).get("spec", ""))
+                    verification_cmd = f"python3 {primary_file}"
+                else: # shell
+                    verification_cmd = node.get("oracle", {}).get("spec", "")
+                    existing_files = []
+                    for root_dir, _, files in os.walk(self.workspace_dir):
+                        for f in files:
+                            if not f.startswith("."):
+                                existing_files.append(f)
+                    
+                    for w in verification_cmd.split():
+                        w_clean = os.path.basename(w.strip("'\""))
+                        if w_clean in existing_files:
+                            primary_file = w_clean
+                            break
+                    if not primary_file:
+                        primary_file = existing_files[0] if existing_files else "solution.py"
+                
+                step_mock = {
+                    "step_id": 1,
+                    "name": node.get("claim", "Verify step"),
+                    "description": node.get("justification", "Verify step justification")
+                }
+                
+                passed_heal, attempts, last_output = self.run_verification_loop(
+                    verification_cmd, primary_file, step_mock
+                )
+                
+                if passed_heal:
+                    passed = True
+                    if node_oracle_type == "numeric":
+                        try:
+                            with open(os.path.join(self.workspace_dir, primary_file)) as fh:
+                                healed_spec = fh.read()
+                            node_oracle = node.get("oracle", {})
+                            node_oracle["spec"] = healed_spec
+                            logic_graph.update_node(active_node_id, oracle=node_oracle)
+                        except Exception:
+                            pass
             
             if passed:
                 logic_graph.update_node(active_node_id, status="validated")

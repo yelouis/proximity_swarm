@@ -41,25 +41,25 @@ class TestProximityWeighting(unittest.TestCase):
         shutil.rmtree(self.test_dir)
 
     def test_fallback_classify_phase(self):
-        # 1. Debugging fallback
+        # 1. Validating fallback
         self.assertEqual(
             proximity_monitor.fallback_classify_phase("Initialize and compile", "Fixing auth crash error bug"),
-            "Debugging"
+            "Validating"
         )
-        # 2. Documentation fallback
+        # 2. Synthesizing fallback
         self.assertEqual(
             proximity_monitor.fallback_classify_phase("Update docs", "Write synthesis report in markdown"),
-            "Documentation"
+            "Synthesizing"
         )
         # 3. Planning fallback
         self.assertEqual(
             proximity_monitor.fallback_classify_phase("Architect plans", "Prepare swarm initialization roadmap"),
             "Planning"
         )
-        # 4. Coding default fallback
+        # 4. Exploring default fallback
         self.assertEqual(
             proximity_monitor.fallback_classify_phase("Build quicksort", "Implement functional feature logic"),
-            "Coding"
+            "Exploring"
         )
 
     @unittest.mock.patch("proximity_monitor.is_ollama_running")
@@ -91,10 +91,10 @@ class TestProximityWeighting(unittest.TestCase):
         self.assertEqual(disk_agent["current_step"]["phase"], "Planning")
 
         # 4. If phase is already cached, it should not check/reclassify
-        agent["current_step"]["phase"] = "Documentation"
+        agent["current_step"]["phase"] = "Synthesizing"
         # We manually modify it. Running classify_phase should return cached value immediately
         phase_cached = proximity_monitor.classify_phase(agent)
-        self.assertEqual(phase_cached, "Documentation")
+        self.assertEqual(phase_cached, "Synthesizing")
 
     @unittest.mock.patch("proximity_monitor.is_ollama_running")
     @unittest.mock.patch("urllib.request.urlopen")
@@ -104,7 +104,7 @@ class TestProximityWeighting(unittest.TestCase):
         # Mock API response
         mock_response = unittest.mock.MagicMock()
         mock_response.read.return_value = json.dumps({
-            "response": json.dumps({"phase": "Coding"})
+            "response": json.dumps({"phase": "Exploring"})
         }).encode("utf-8")
         mock_urlopen.return_value.__enter__.return_value = mock_response
         
@@ -118,11 +118,11 @@ class TestProximityWeighting(unittest.TestCase):
         }
         
         phase = proximity_monitor.classify_phase(agent)
-        self.assertEqual(phase, "Coding")
-        self.assertEqual(agent["current_step"]["phase"], "Coding")
+        self.assertEqual(phase, "Exploring")
+        self.assertEqual(agent["current_step"]["phase"], "Exploring")
 
     def test_calculate_proximity_dynamic_weights(self):
-        # Setup two agents in different phases: Planning and Coding
+        # Setup two agents in different phases: Planning and Exploring
         agent1 = {
             "id": "001",
             "goal": "Test goal 1",
@@ -140,7 +140,7 @@ class TestProximityWeighting(unittest.TestCase):
             "current_step": {
                 "name": "Write db logic",
                 "description": "implement coding logic",
-                "phase": "Coding"   # Pre-cached
+                "phase": "Exploring"   # Pre-cached
             },
             "touched_files": ["db.py", "auth.py"],
             "tools_used": ["sql", "python"]
