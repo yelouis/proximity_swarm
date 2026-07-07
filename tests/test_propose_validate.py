@@ -152,8 +152,8 @@ class TestProposeValidate(unittest.TestCase):
         # Make sure validator's progress didn't advance
         self.assertEqual(validator.state.get("progress", 0), 0)
 
-    def test_numeric_oracle_self_healing_graph(self):
-        # 1. Add a proposed node with a numeric oracle that initially fails
+    def test_numeric_oracle_no_self_healing_graph(self):
+        # 1. Add a proposed node with a numeric oracle that fails
         logic_graph.add_node({
             "node_id": "heal_node",
             "kind": "lemma",
@@ -171,7 +171,7 @@ class TestProposeValidate(unittest.TestCase):
         validator = AgentRunner(
             agent_id="501",
             task_id="task_jwt_auth",
-            llm_provider="ollama", # non-rules to trigger self-healing
+            llm_provider="ollama", 
             graph_mode="graph"
         )
         validator.state["role_mode"] = "validator"
@@ -179,12 +179,7 @@ class TestProposeValidate(unittest.TestCase):
         validator.state["active_node_id"] = "heal_node"
         save_json(validator.state_file, validator.state)
         
-        # Mock heal_file to provide a passing python assertion
-        def fake_heal(filename, step, err):
-            return "assert 1 + 1 == 2"
-        validator.heal_file = fake_heal
-        
-        # Mock is_ollama_running to return True to allow healing loop
+        # Mock is_ollama_running to return True
         import agent_runner
         old_is_ollama = agent_runner.is_ollama_running
         agent_runner.is_ollama_running = lambda: True
@@ -192,11 +187,11 @@ class TestProposeValidate(unittest.TestCase):
         try:
             validator.execute_step()
             
-            # The node should now be validated
+            # The node should now be refuted
             healed_node = logic_graph.get_node("heal_node")
-            self.assertEqual(healed_node["status"], "validated")
-            # And the spec should be updated to the passing assertion
-            self.assertEqual(healed_node["oracle"]["spec"], "assert 1 + 1 == 2")
+            self.assertEqual(healed_node["status"], "refuted")
+            # And the spec should be unchanged
+            self.assertEqual(healed_node["oracle"]["spec"], "assert 1 + 1 == 3")
         finally:
             agent_runner.is_ollama_running = old_is_ollama
 

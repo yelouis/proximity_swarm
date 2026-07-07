@@ -12,6 +12,20 @@ def select_judge_model(provider=None, model=None, fallback_provider=None, fallba
         
     if provider == "ollama":
         if not model:
+            import urllib.request
+            import json
+            try:
+                with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=1.0) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                    models_info = data.get("models", [])
+                    if models_info:
+                        models_info.sort(key=lambda m: m.get("size", 0), reverse=True)
+                        largest_model = models_info[0].get("name")
+                        if largest_model:
+                            print(f"[Judge] Auto-detected largest local Ollama model: {largest_model}")
+                            return "ollama", largest_model
+            except Exception:
+                pass
             return "ollama", fallback_model or "llama3"
         return "ollama", model
         

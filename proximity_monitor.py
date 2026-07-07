@@ -542,6 +542,8 @@ def run_cascading_kills():
 
 
 BUDGET = 20000
+JUDGE_PROVIDER = None
+JUDGE_MODEL = None
 
 
 def call_ollama_api_local(prompt, model):
@@ -723,7 +725,7 @@ def monitor_loop(poll_interval=1.5, collision_threshold=0.5, graph_mode="graph")
             if budget_exceeded or (current_budget < 20 and len(leafs) > current_budget):
                 import judge
                 judge_provider, judge_model = judge.select_judge_model(
-                    None, None,
+                    JUDGE_PROVIDER, JUDGE_MODEL,
                     "ollama" if is_ollama_running() else "gemini" if os.environ.get("GEMINI_API_KEY") else "rules",
                     OLLAMA_MODEL
                 )
@@ -852,12 +854,16 @@ if __name__ == "__main__":
     parser.add_argument("--budget", type=int, default=20000, help="Maximum active leaf agent output token budget cap limit")
     parser.add_argument("--auto-approve-spawns", action="store_true", help="Bypass manual operator approval for spawn requests")
     parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode")
+    parser.add_argument("--judge-provider", help="LLM API provider for the Judge")
+    parser.add_argument("--judge-model", help="LLM model string to query for the Judge")
     args = parser.parse_args()
     
     OLLAMA_MODEL = args.ollama_model
     INTERACTIVE = args.interactive
     BUDGET = args.budget
     AUTO_APPROVE_SPAWNS = args.auto_approve_spawns
+    JUDGE_PROVIDER = args.judge_provider
+    JUDGE_MODEL = args.judge_model
     
     try:
         monitor_loop(poll_interval=args.interval, collision_threshold=args.threshold, graph_mode=args.graph_mode)

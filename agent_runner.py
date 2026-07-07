@@ -27,18 +27,16 @@ MAX_HEAL_ATTEMPTS = int(os.environ.get("PROXIMITY_MAX_HEAL_ATTEMPTS", "3"))
 
 
 CURRENT_AGENT_STATE_FILE = None
+CURRENT_AGENT_RUNNER = None
 
 def _accumulate_tokens(count):
-    global CURRENT_AGENT_STATE_FILE
-    if not CURRENT_AGENT_STATE_FILE or count <= 0:
+    global CURRENT_AGENT_RUNNER
+    if not CURRENT_AGENT_RUNNER or count <= 0:
         return
     try:
-        import os
-        if os.path.exists(CURRENT_AGENT_STATE_FILE):
-            data = load_json(CURRENT_AGENT_STATE_FILE)
-            if data:
-                data["output_tokens"] = data.get("output_tokens", 0) + count
-                save_json(CURRENT_AGENT_STATE_FILE, data)
+        runner = CURRENT_AGENT_RUNNER
+        runner.state["output_tokens"] = runner.state.get("output_tokens", 0) + count
+        save_json(runner.state_file, runner.state)
     except Exception:
         pass
 
@@ -418,7 +416,7 @@ def is_ollama_running():
 
 
 class AgentRunner:
-    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None, sub_swarm_id=None, graph_mode="graph"):
+    def __init__(self, agent_id, task_id=None, interactive=False, step_delay=3.0, offset_suffix=None, llm_provider=None, ollama_model="gemma4:latest", personality=None, goal=None, sub_swarm_id=None, graph_mode="graph", judge_provider=None, judge_model=None):
         self.agent_id = agent_id
         self.interactive = interactive
         self.step_delay = step_delay
@@ -430,10 +428,13 @@ class AgentRunner:
         self.custom_goal = goal
         self.sub_swarm_id = sub_swarm_id
         self.graph_mode = graph_mode
+        self.judge_provider = judge_provider
+        self.judge_model = judge_model
         
         self.state_file = os.path.join(AGENTS_DIR, f"agent_{self.agent_id}.json")
-        global CURRENT_AGENT_STATE_FILE
+        global CURRENT_AGENT_STATE_FILE, CURRENT_AGENT_RUNNER
         CURRENT_AGENT_STATE_FILE = self.state_file
+        CURRENT_AGENT_RUNNER = self
         self.workspace_dir = os.path.join(WORKSPACES_DIR, f"agent_{self.agent_id}")
         
         os.makedirs(AGENTS_DIR, exist_ok=True)
@@ -1337,6 +1338,18 @@ class AgentRunner:
                 if not ancestors_desc:
                     ancestors_desc = "None (this is the starting step, build from the global goal/premises)."
                 
+                is_proof_run = any(w in self.state.get('goal', '').lower() for w in ["prove", "proof", "conjecture", "collatz", "theorem"])
+                oracle_types_desc = (
+                    "one of 'numeric', 'symbolic', 'checker_model', 'none' (do NOT use 'shell' since this is a research/proof task with no workspace files)"
+                    if is_proof_run else
+                    "one of 'shell', 'numeric', 'symbolic', 'checker_model', 'none'"
+                )
+                oracle_spec_desc = (
+                    "For 'numeric', python code that prints True or exits 0 when valid (e.g. 'assert 2 + 2 == 4'). For 'symbolic', python SymPy code. For 'checker_model', the rubric/question for the Judge to verify."
+                    if is_proof_run else
+                    "For 'shell', the shell command (e.g. 'pytest tests/test_math.py'). For 'numeric', python code that prints True or exits 0 when valid (e.g. 'assert 2 + 2 == 4'). For 'symbolic', python SymPy code. For 'checker_model', the rubric/question for the Judge to verify."
+                )
+                
                 prompt = (
                     f"You are a Proposer Agent {self.agent_id} (Role: {self.state.get('personality', 'Generalist')}) working to solve the goal: '{self.state.get('goal', '')}'.\n"
                     f"We are trying to prove or resolve the following target node:\n"
@@ -1351,8 +1364,8 @@ class AgentRunner:
                     f"2. 'justification' (string): Brief explanation, reasoning, or code justification supporting the claim.\n"
                     f"3. 'depends_on' (array of strings): A list of node IDs from the validated ancestors above that this new step directly builds upon. If it is a starting step, use 'premise_0'.\n"
                     f"4. 'oracle' (object): How to validate this claim. Must contain:\n"
-                    f"   - 'type' (string): one of 'shell', 'numeric', 'symbolic', 'checker_model', 'none'. Use 'numeric' for Python math checks, 'shell' for scripts, or 'checker_model' if it can only be verified by an LLM Judge.\n"
-                    f"   - 'spec' (string): For 'shell', the shell command (e.g. 'pytest tests/test_math.py'). For 'numeric', python code that prints True or exits 0 when valid (e.g. 'assert 2 + 2 == 4'). For 'symbolic', python SymPy code. For 'checker_model', the rubric/question for the Judge to verify.\n\n"
+                    f"   - 'type' (string): {oracle_types_desc}. Use 'numeric' for Python math checks, or 'checker_model' if it can only be verified by an LLM Judge.\n"
+                    f"   - 'spec' (string): {oracle_spec_desc}\n\n"
                     f"Respond strictly in JSON format matching the schema described above."
                 )
                 
@@ -1461,53 +1474,32 @@ class AgentRunner:
                 if node_oracle_type == "none":
                     passed = False
             
-            if not passed and self.llm_provider != "rules" and node_oracle_type in ["shell", "numeric"]:
+            if not passed and self.llm_provider != "rules" and node_oracle_type == "shell":
+                verification_cmd = node.get("oracle", {}).get("spec", "")
+                existing_files = []
+                for root_dir, _, files in os.walk(self.workspace_dir):
+                    for f in files:
+                        if not f.startswith("."):
+                            existing_files.append(f)
+                
                 primary_file = None
-                verification_cmd = None
+                for w in verification_cmd.split():
+                    w_clean = os.path.basename(w.strip("'\""))
+                    if w_clean in existing_files:
+                        primary_file = w_clean
+                        break
                 
-                if node_oracle_type == "numeric":
-                    primary_file = f"check_{active_node_id}.py"
-                    file_path = os.path.join(self.workspace_dir, primary_file)
-                    with open(file_path, "w") as fh:
-                        fh.write(node.get("oracle", {}).get("spec", ""))
-                    verification_cmd = f"python3 {primary_file}"
-                else: # shell
-                    verification_cmd = node.get("oracle", {}).get("spec", "")
-                    existing_files = []
-                    for root_dir, _, files in os.walk(self.workspace_dir):
-                        for f in files:
-                            if not f.startswith("."):
-                                existing_files.append(f)
-                    
-                    for w in verification_cmd.split():
-                        w_clean = os.path.basename(w.strip("'\""))
-                        if w_clean in existing_files:
-                            primary_file = w_clean
-                            break
-                    if not primary_file:
-                        primary_file = existing_files[0] if existing_files else "solution.py"
-                
-                step_mock = {
-                    "step_id": 1,
-                    "name": node.get("claim", "Verify step"),
-                    "description": node.get("justification", "Verify step justification")
-                }
-                
-                passed_heal, attempts, last_output = self.run_verification_loop(
-                    verification_cmd, primary_file, step_mock
-                )
-                
-                if passed_heal:
-                    passed = True
-                    if node_oracle_type == "numeric":
-                        try:
-                            with open(os.path.join(self.workspace_dir, primary_file)) as fh:
-                                healed_spec = fh.read()
-                            node_oracle = node.get("oracle", {})
-                            node_oracle["spec"] = healed_spec
-                            logic_graph.update_node(active_node_id, oracle=node_oracle)
-                        except Exception:
-                            pass
+                if primary_file and primary_file not in verification_cmd:
+                    step_mock = {
+                        "step_id": 1,
+                        "name": node.get("claim", "Verify step"),
+                        "description": node.get("justification", "Verify step justification")
+                    }
+                    passed_heal, attempts, last_output = self.run_verification_loop(
+                        verification_cmd, primary_file, step_mock
+                    )
+                    if passed_heal:
+                        passed = True
             
             if passed:
                 logic_graph.update_node(active_node_id, status="validated")
@@ -2295,6 +2287,8 @@ def main():
     parser.add_argument("--goal", help="The dedicated goal/subtask assigned to this agent")
     parser.add_argument("--sub-swarm-id", help="The sub-swarm functional group ID this agent belongs to")
     parser.add_argument("--graph-mode", choices=["linear", "graph"], default="graph", help="Execution mode")
+    parser.add_argument("--judge-provider", help="LLM API provider for the Judge")
+    parser.add_argument("--judge-model", help="LLM model string to query for the Judge")
     args = parser.parse_args()
     
     runner = AgentRunner(
@@ -2308,7 +2302,9 @@ def main():
         personality=args.personality,
         goal=args.goal,
         sub_swarm_id=args.sub_swarm_id,
-        graph_mode=args.graph_mode
+        graph_mode=args.graph_mode,
+        judge_provider=args.judge_provider,
+        judge_model=args.judge_model
     )
     
     print(f"Starting Agent {args.agent_id} runner...")

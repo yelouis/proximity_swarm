@@ -37,7 +37,7 @@ def is_agent_sub_swarm_active(agent_id):
     return True
 
 
-def evaluate_sub_swarm_completion():
+def evaluate_sub_swarm_completion(llm_provider=None, ollama_model=None, judge_provider=None, judge_model=None):
     if not os.path.exists(orchestrator_file):
         return
     try:
@@ -62,7 +62,65 @@ def evaluate_sub_swarm_completion():
                 if n.get("kind") == "goal" and n.get("status") != "validated":
                     deps = n.get("depends_on", [])
                     if deps and all(nodes.get(d, {}).get("status") == "validated" for d in deps):
-                        logic_graph.update_node(n["node_id"], status="validated")
+                        # Rules provider path (deterministic)
+                        if (llm_provider or "rules") == "rules":
+                            logic_graph.update_node(n["node_id"], status="validated")
+                            continue
+                            
+                        # Real LLM path
+                        # 1. Frontier check (no open sub-claims remain under the goal)
+                        frontier = logic_graph.frontier()
+                        frontier_ids = [fn["node_id"] for fn in frontier]
+                        if frontier_ids and frontier_ids != [n["node_id"]]:
+                            continue
+                            
+                        # 2. Minimum structure check (at least 2 validated lemmas/inferences)
+                        validated_lemmas = [nd for nd in nodes.values() if nd.get("kind") in ["lemma", "inference"] and nd.get("status") == "validated"]
+                        if len(validated_lemmas) < 2:
+                            continue
+                            
+                        # 3. Skip check if already evaluated for this exact set of dependencies
+                        last_result = n.get("oracle", {}).get("result") or {}
+                        if last_result.get("passed") is False and last_result.get("evaluated_deps") == sorted(deps):
+                            continue
+                            
+                        # 4. Entailment check via Judge
+                        child_claims = []
+                        for d in deps:
+                            dep_node = nodes.get(d)
+                            if dep_node:
+                                child_claims.append(f"- Node {d} (Claim: '{dep_node.get('claim', '')}', Justification: '{dep_node.get('justification', '')}')")
+                        justification = "The following supporting steps have been validated:\n" + "\n".join(child_claims)
+                        
+                        temp_node = n.copy()
+                        temp_node["justification"] = justification
+                        temp_node["oracle"] = {
+                            "type": "checker_model",
+                            "spec": f"Given these validated claims (list children + their justifications), do they jointly establish: {n.get('claim', '')}? Answer valid=true only if the chain is complete."
+                        }
+                        
+                        import judge
+                        j_prov, j_model = judge.select_judge_model(
+                            provider=judge_provider,
+                            model=judge_model,
+                            fallback_provider=llm_provider,
+                            fallback_model=ollama_model
+                        )
+                        
+                        res = judge.validate_step(temp_node, provider=j_prov, model=j_model)
+                        if res.get("valid"):
+                            logic_graph.update_node(n["node_id"], status="validated", justification=justification)
+                            print(f"[Supervisor] Goal {n['node_id']} validated by LLM Judge! Entailment confirmed.")
+                        else:
+                            # Save failed attempt
+                            n_oracle = n.get("oracle", {}) or {}
+                            n_oracle["result"] = {
+                                "passed": False,
+                                "detail": res.get("reason", "Not established yet."),
+                                "evaluated_deps": sorted(deps)
+                            }
+                            logic_graph.update_node(n["node_id"], oracle=n_oracle)
+                            print(f"[Supervisor] Goal {n['node_id']} entailment check failed: {res.get('reason')}")
             
             nodes = logic_graph._get_all_nodes()
             path = logic_graph.validated_path_to_goal()
@@ -74,8 +132,8 @@ def evaluate_sub_swarm_completion():
                         break
                 if goal_node and goal_node.get("status") == "validated":
                     is_graph_complete = True
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Supervisor completion check error]: {e}")
             
         updated = False
         for sid, s in state.get("sub_swarms", {}).items():
@@ -126,7 +184,7 @@ def evaluate_sub_swarm_completion():
         print(f"[Supervisor Error] Failed to evaluate sub-swarms: {e}")
 
 
-def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False, graph_mode="graph", macro_goal="Run task"):
+def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, auto_approve_spawns=False, graph_mode="graph", macro_goal="Run task", judge_provider=None, judge_model=None, max_duration_seconds=None, max_relaunches=10):
     """
     Launches a swarm dynamically, starting with initial_agents (list of dicts containing agent_id and task_id).
     Dynamically spawns runners for any children created during execution.
@@ -138,6 +196,16 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     print(f"  Initial Agents: {len(initial_agents)} | Deconfliction: {deconflict} | Interactive: {interactive}")
     print(f"  LLM Provider: {llm_provider or 'Auto-Detect'} | Ollama Model: {ollama_model} | Step Delay: {step_delay}s | Budget: {budget} | Auto-approve Spawns: {auto_approve_spawns}")
     print("="*60 + "\n")
+    
+    if max_duration_seconds is None:
+        if llm_provider == "rules":
+            max_duration_seconds = 120
+        else:
+            max_duration_seconds = 1800  # 30 minutes for real models
+            
+    logs_dir = os.path.join(STATE_DIR, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    open_log_files = {}
     
     if not os.path.exists(orchestrator_file):
         sub_swarms = {
@@ -184,7 +252,11 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                     "kind": "goal",
                     "claim": macro_goal,
                     "status": "proposed",
-                    "depends_on": []
+                    "depends_on": [],
+                    "oracle": {
+                        "type": "checker_model",
+                        "spec": f"Given these validated claims (list children + their justifications), do they jointly establish: {macro_goal}? Answer valid=true only if the chain is complete."
+                    }
                 })
                 logic_graph.add_node({
                     "node_id": "premise_0",
@@ -208,10 +280,16 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     if auto_approve_spawns:
         monitor_cmd.append("--auto-approve-spawns")
     monitor_cmd.extend(["--graph-mode", graph_mode])
+    if judge_provider:
+        monitor_cmd.extend(["--judge-provider", judge_provider])
+    if judge_model:
+        monitor_cmd.extend(["--judge-model", judge_model])
+        
+    monitor_log_file = open(os.path.join(logs_dir, "monitor_stdout.log"), "w", buffering=1)
     monitor_proc = subprocess.Popen(
         monitor_cmd, 
-        stdout=subprocess.DEVNULL, 
-        stderr=subprocess.DEVNULL
+        stdout=monitor_log_file, 
+        stderr=subprocess.STDOUT
     )
     time.sleep(1.0)  # wait for supervisor startup
     
@@ -220,7 +298,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
     # Helper to launch an agent runner
     def launch_agent(agent_id, task_id=None, offset_suffix=None, personality=None, goal=None):
         cmd = [
-            sys.executable, "agent_runner.py",
+            sys.executable, "-u", "agent_runner.py",
             "--agent-id", agent_id,
             "--step-delay", str(step_delay),
             "--steps", "15"
@@ -240,9 +318,15 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
         if goal:
             cmd.extend(["--goal", goal])
         cmd.extend(["--graph-mode", graph_mode])
+        if judge_provider:
+            cmd.extend(["--judge-provider", judge_provider])
+        if judge_model:
+            cmd.extend(["--judge-model", judge_model])
             
         print(f"[Supervisor] Launching Agent {agent_id} runner subprocess...")
-        running_processes[agent_id] = subprocess.Popen(cmd)
+        agent_log_file = open(os.path.join(logs_dir, f"agent_{agent_id}.log"), "a", buffering=1)
+        open_log_files[agent_id] = agent_log_file
+        running_processes[agent_id] = subprocess.Popen(cmd, stdout=agent_log_file, stderr=subprocess.STDOUT)
 
 
     # Initialize trace nodes for initial agents
@@ -272,8 +356,9 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
 
     loop_start = time.time()
     relaunch_counts = {}
-    MAX_RELAUNCHES_PER_AGENT = 10
-    MAX_TOTAL_DURATION = 120 # 2 minutes safety cap
+    MAX_RELAUNCHES_PER_AGENT = max_relaunches
+    MAX_TOTAL_DURATION = max_duration_seconds
+    exit_status = "completed"
 
     try:
         # Dynamic monitoring loop
@@ -289,7 +374,12 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                 print(f"[Supervisor] Agent {agent_id} runner subprocess exited.")
                 
             # Evaluate sub-swarm completions and transitions
-            evaluate_sub_swarm_completion()
+            evaluate_sub_swarm_completion(
+                llm_provider=llm_provider,
+                ollama_model=ollama_model,
+                judge_provider=judge_provider,
+                judge_model=judge_model
+            )
             
             # Global stop: Break immediately when the goal is proven
             try:
@@ -312,6 +402,25 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             except Exception as e:
                 print(f"[Supervisor] Error checking goal status: {e}")
             
+            # Check for budget limit alert from proximity monitor
+            budget_alert_path = os.path.join(STATE_DIR, "budget_alert.json")
+            if os.path.exists(budget_alert_path):
+                try:
+                    with open(budget_alert_path, 'r') as f:
+                        alert_data = json.load(f)
+                    if alert_data.get("budget_exceeded"):
+                        print(f"[Supervisor] Safety Guard: Swarm execution exceeded token budget limit ({alert_data.get('budget_limit')}). Terminating.")
+                        exit_status = "budget_exhausted"
+                        for pid, proc in list(running_processes.items()):
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                        running_processes.clear()
+                        break
+                except Exception:
+                    pass
+
             # Check if any initial agents should be launched now that their sub-swarm is active
             for idx, agent_info in enumerate(initial_agents):
                 agent_id = agent_info["agent_id"]
@@ -369,6 +478,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             # safety duration cap check
             if time.time() - loop_start > MAX_TOTAL_DURATION:
                 print(f"[Supervisor] Safety Guard: Swarm execution exceeded max duration of {MAX_TOTAL_DURATION}s. Terminating.")
+                exit_status = "timeout"
                 for pid, proc in list(running_processes.items()):
                     try:
                         proc.terminate()
@@ -379,7 +489,12 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
                 
             time.sleep(0.5)
             
-        print("\n[Supervisor] Swarm execution completed successfully.")
+        if exit_status == "completed":
+            print("\n[Supervisor] Swarm execution completed successfully.")
+        elif exit_status == "timeout":
+            print("\n[Supervisor] Swarm execution terminated due to timeout (max duration exceeded).")
+        elif exit_status == "budget_exhausted":
+            print("\n[Supervisor] Swarm execution terminated due to budget exhaustion.")
         
         # Phase 8: Emit observability artifacts
         try:
@@ -420,7 +535,7 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             memory_store.save_episode(
                 goal=macro_goal,
                 role="Orchestrator",
-                status="completed",
+                status=exit_status,
                 steps=[{"name": "Graph swarm run", "description": "Swarm run finished with graph validation."}],
                 errors="",
                 deliverable_summary=f"Graph size: {len(graph_json.get('nodes', {}))} nodes.",
@@ -447,10 +562,19 @@ def run_swarm(initial_agents, deconflict=False, interactive=False, llm_provider=
             monitor_proc.wait()
         except Exception:
             pass
+        for f in open_log_files.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+        try:
+            monitor_log_file.close()
+        except Exception:
+            pass
         print("[Supervisor] Cleaned up child processes.")
 
 
-def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, graph_mode="graph"):
+def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, ollama_model="gemma4:latest", step_delay=2.0, budget=20000, graph_mode="graph", judge_provider=None, judge_model=None, max_duration_seconds=None, max_relaunches=10):
     """
     Launches two agents assigned to the same task (redundancy test).
     If deconflict is enabled, applies goal deconfliction offsets to their files.
@@ -467,7 +591,11 @@ def run_redundant_demo(interactive=False, deconflict=False, llm_provider=None, o
         ollama_model=ollama_model,
         step_delay=step_delay,
         budget=budget,
-        graph_mode=graph_mode
+        graph_mode=graph_mode,
+        judge_provider=judge_provider,
+        judge_model=judge_model,
+        max_duration_seconds=max_duration_seconds,
+        max_relaunches=max_relaunches
     )
 
 
@@ -490,6 +618,10 @@ def main():
     parser.add_argument("--gc-workspace", action="store_true", help="Garbage collect workspace tombstones at the end of the run")
     parser.add_argument("--gc-graph", action="store_true", help="Garbage collect graph node files at the end of the run")
     parser.add_argument("--gc-dry-run", action="store_true", help="Dry-run mode for workspace and graph garbage collection")
+    parser.add_argument("--judge-provider", help="LLM API provider for the Judge")
+    parser.add_argument("--judge-model", help="LLM model string to query for the Judge")
+    parser.add_argument("--max-duration-seconds", type=int, help="Maximum execution duration in seconds")
+    parser.add_argument("--max-relaunches", type=int, default=10, help="Maximum number of relaunches allowed per agent")
     args = parser.parse_args()
     
     spec_goal = None
@@ -506,6 +638,15 @@ def main():
         args.budget = spec.get("budget", args.budget)
         args.llm_provider = spec.get("swarm_provider", args.llm_provider)
         args.graph_mode = spec.get("graph_mode", args.graph_mode)
+        if "judge_provider" in spec:
+            args.judge_provider = spec["judge_provider"]
+        if "judge_model" in spec:
+            args.judge_model = spec["judge_model"]
+        if "max_duration_seconds" in spec:
+            args.max_duration_seconds = spec["max_duration_seconds"]
+        if "max_relaunches" in spec:
+            args.max_relaunches = spec["max_relaunches"]
+            
         if "seed_roles" in spec:
             args.agents_config = json.dumps([
                 {
@@ -533,7 +674,11 @@ def main():
                 ollama_model=args.ollama_model,
                 step_delay=args.step_delay,
                 budget=args.budget,
-                graph_mode=args.graph_mode
+                graph_mode=args.graph_mode,
+                judge_provider=getattr(args, "judge_provider", None),
+                judge_model=getattr(args, "judge_model", None),
+                max_duration_seconds=getattr(args, "max_duration_seconds", None),
+                max_relaunches=getattr(args, "max_relaunches", 10)
             )
         elif args.agents_config:
             try:
@@ -552,7 +697,11 @@ def main():
                 budget=args.budget,
                 auto_approve_spawns=auto_approve_spawns,
                 graph_mode=args.graph_mode,
-                macro_goal=spec_goal if spec_goal else "Run task"
+                macro_goal=spec_goal if spec_goal else "Run task",
+                judge_provider=getattr(args, "judge_provider", None),
+                judge_model=getattr(args, "judge_model", None),
+                max_duration_seconds=getattr(args, "max_duration_seconds", None),
+                max_relaunches=getattr(args, "max_relaunches", 10)
             )
         elif args.task_id:
             personalities = []
@@ -576,7 +725,11 @@ def main():
                 step_delay=args.step_delay,
                 budget=args.budget,
                 auto_approve_spawns=auto_approve_spawns,
-                graph_mode=args.graph_mode
+                graph_mode=args.graph_mode,
+                judge_provider=getattr(args, "judge_provider", None),
+                judge_model=getattr(args, "judge_model", None),
+                max_duration_seconds=getattr(args, "max_duration_seconds", None),
+                max_relaunches=getattr(args, "max_relaunches", 10)
             )
         else:
             parser.print_help()
